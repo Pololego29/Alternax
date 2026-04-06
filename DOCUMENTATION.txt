@@ -1,0 +1,837 @@
+================================================================================
+GROUPAX — SCRAPPEUR INTELLIGENT D'OFFRES D'ALTERNANCE
+Documentation technique complète
+================================================================================
+
+Auteurs   : Groupax
+Date      : Avril 2026
+Dépôt     : https://github.com/Pololego29/Groupax
+
+
+════════════════════════════════════════════════════════════════════════════════
+1. CONTEXTE ET PROBLÉMATIQUE
+════════════════════════════════════════════════════════════════════════════════
+
+Les offres d'alternance sont aujourd'hui dispersées sur des dizaines de sites
+différents : Indeed, HelloWork, APEC, LinkedIn, les sites d'entreprises, etc.
+Pour un étudiant cherchant une alternance, cela signifie :
+
+  - Consulter manuellement chaque site tous les jours
+  - Voir la même offre publiée sur 3 sites différents (doublons)
+  - Ne pas pouvoir comparer ou filtrer efficacement
+  - Rater des offres parce qu'elles ont été publiées il y a 2 jours
+
+Notre projet répond à ce problème en automatisant toute la chaîne :
+collecte → nettoyage → stockage → affichage centralisé.
+
+L'objectif final est une plateforme intelligente qui :
+  1. Scrape automatiquement les offres h24
+  2. Déduplique les annonces identiques
+  3. Les affiche sur un site web centralisé avec filtres
+  4. (Phase 2) Analyse les compétences et propose des recommandations NLP
+
+
+════════════════════════════════════════════════════════════════════════════════
+2. ARCHITECTURE GÉNÉRALE
+════════════════════════════════════════════════════════════════════════════════
+
+Le projet est organisé en couches indépendantes qui communiquent via des
+interfaces bien définies. Chaque couche a une responsabilité unique.
+
+    ┌─────────────────────────────────────────────────┐
+    │                   SCRAPERS                      │
+    │   (collecte des offres sur les sites sources)   │
+    │              scrapers/indeed.py                 │
+    └─────────────────────┬───────────────────────────┘
+                          │  Liste de JobOffer
+                          ▼
+    ┌─────────────────────────────────────────────────┐
+    │                   PIPELINE                      │
+    │   (nettoyage et déduplication des données)      │
+    │           pipeline/deduplicator.py              │
+    └─────────────────────┬───────────────────────────┘
+                          │  Offres uniques
+                          ▼
+    ┌─────────────────────────────────────────────────┐
+    │                  DATABASE                       │
+    │   (stockage persistant SQLite)                  │
+    │              database/db.py                     │
+    └─────────────────────┬───────────────────────────┘
+                          │  Requêtes SQL
+                          ▼
+    ┌─────────────────────────────────────────────────┐
+    │                     API                         │
+    │   (exposition des données via HTTP REST)        │
+    │               api/main.py                       │
+    └─────────────────────┬───────────────────────────┘
+                          │  JSON via HTTP
+                          ▼
+    ┌─────────────────────────────────────────────────┐
+    │                  FRONTEND                       │
+    │   (interface web consultée par l'utilisateur)   │
+    │    frontend/index.html + style.css + app.js     │
+    └─────────────────────────────────────────────────┘
+
+Le scheduler (APScheduler) est intégré dans l'API et déclenche le scraping
+toutes les 6 heures automatiquement.
+
+Structure des fichiers :
+
+    scrapper-alternance/
+    ├── run.py                  Point d'entrée du serveur (fix Windows)
+    ├── requirements.txt        Dépendances Python
+    ├── .gitignore
+    ├── README.md
+    │
+    ├── scrapers/
+    │   └── indeed.py           Scraper Indeed France
+    │
+    ├── pipeline/
+    │   └── deduplicator.py     Déduplication avant insertion BDD
+    │
+    ├── database/
+    │   └── db.py               SQLite — schéma, CRUD, connexion
+    │
+    ├── api/
+    │   └── main.py             FastAPI + scheduler APScheduler
+    │
+    ├── frontend/
+    │   ├── index.html          Page HTML du site vitrine
+    │   ├── style.css           Styles complémentaires
+    │   └── app.js              Logique JavaScript (appels API, rendu)
+    │
+    └── data/                   Données locales (ignorées par git)
+        ├── offers.db           Base SQLite
+        ├── indeed_offers.csv   Export CSV (scraper standalone)
+        └── indeed_offers.json  Export JSON (scraper standalone)
+
+
+════════════════════════════════════════════════════════════════════════════════
+3. COUCHE SCRAPERS — scrapers/indeed.py
+════════════════════════════════════════════════════════════════════════════════
+
+─────────────────────────────────────
+3.1 POURQUOI PLAYWRIGHT ET PAS REQUESTS ?
+─────────────────────────────────────
+
+La première approche pour scraper un site web est d'utiliser la bibliothèque
+"requests" : on envoie une requête HTTP GET et on analyse le HTML reçu avec
+BeautifulSoup. C'est simple, rapide, et suffisant pour les sites statiques.
+
+Le problème : Indeed (comme la plupart des grands sites d'emploi) charge ses
+offres via JavaScript. Quand on fait un simple GET sur fr.indeed.com/jobs,
+le serveur renvoie une page HTML quasiment vide — les offres sont chargées
+ensuite par du code JavaScript qui s'exécute dans le navigateur.
+
+Avec requests, on récupère cette page vide. Aucune offre visible.
+
+Solution : Playwright. C'est une bibliothèque qui pilote un vrai navigateur
+(Chromium, Firefox ou WebKit) via du code Python. Le navigateur charge la page,
+exécute le JavaScript, et on peut ensuite lire le DOM résultant avec toutes
+les offres déjà présentes. C'est exactement ce que ferait un utilisateur humain.
+
+─────────────────────────────────────
+3.2 LE MODÈLE DE DONNÉES : JobOffer
+─────────────────────────────────────
+
+Toute la chaîne de traitement repose sur un modèle unique : le dataclass
+JobOffer. C'est un contrat entre toutes les couches du projet.
+
+    @dataclass
+    class JobOffer:
+        title         : str   # Intitulé du poste
+        company       : str   # Nom de l'entreprise
+        location      : str   # Ville ou région
+        contract_type : str   # Type de contrat (ex: "Alternance")
+        salary        : str   # Rémunération si disponible, sinon ""
+        description   : str   # Extrait de la description de l'offre
+        url           : str   # Lien unique vers l'offre (clé de dédup)
+        source        : str   # Identifiant de la source ("indeed", etc.)
+        scraped_at    : str   # Horodatage ISO 8601 de la collecte
+
+Pourquoi un dataclass ?
+  - Sérialisation facile vers dict/CSV/JSON via asdict()
+  - Validation implicite des champs (typage Python)
+  - Format commun : quand on ajoutera HelloWork ou APEC, leurs scrapers
+    retourneront aussi des JobOffer. La déduplication et la BDD n'ont pas
+    à changer — elles ne connaissent que JobOffer.
+
+─────────────────────────────────────
+3.3 STRATÉGIE ANTI-DÉTECTION
+─────────────────────────────────────
+
+Indeed (et la plupart des sites à fort trafic) détecte les bots automatiques
+et bloque ou ralentit leur accès. Voici les techniques utilisées pour contourner
+cette détection, et pourquoi chacune est nécessaire.
+
+A) headless=False
+   Un navigateur "headless" n'a pas d'interface graphique visible.
+   Indeed détecte certaines propriétés spécifiques aux navigateurs headless
+   (timing de rendu, APIs manquantes, etc.) et les bloque plus facilement.
+   En mode headless=False, une fenêtre Chromium visible s'ouvre — le
+   navigateur se comporte exactement comme un vrai utilisateur.
+   Inconvénient : on voit la fenêtre s'ouvrir pendant le scraping.
+
+B) Masquage de navigator.webdriver
+   Quand Playwright contrôle un navigateur, JavaScript peut détecter cela
+   via la propriété "navigator.webdriver" qui est normalement undefined pour
+   un utilisateur humain mais true pour un navigateur automatisé.
+   On injecte un script au démarrage qui écrase cette propriété :
+       navigator.webdriver → undefined
+   Ainsi, le code anti-bot d'Indeed ne peut plus détecter l'automatisation
+   via cette méthode.
+
+C) Rotation des User-Agents
+   Le User-Agent est une chaîne envoyée dans chaque requête HTTP qui identifie
+   le navigateur et le système d'exploitation. Un bot qui envoie toujours le
+   même UA est facilement repérable. On maintient une liste de 4 UA réalistes
+   (Chrome Windows, Firefox Windows, Chrome Mac) et on en choisit un au hasard
+   à chaque session.
+
+D) Warm-up sur la page d'accueil
+   Un vrai utilisateur qui cherche une alternance ouvre d'abord fr.indeed.com,
+   pas directement fr.indeed.com/jobs?q=alternance&l=France. Arriver directement
+   sur une URL de recherche sans cookies ni historique est suspect.
+   Le warm-up simule ce comportement naturel : on visite la page d'accueil,
+   on attend 1.5 à 3 secondes, on fait défiler la page, puis on lance la recherche.
+
+E) Navigation via le bouton "Suivant" (pas des URLs directes)
+   Pour paginer, on aurait pu construire les URLs :
+       page 1 : ?start=0
+       page 2 : ?start=15
+       page 3 : ?start=30
+   Mais sauter directement de la page 1 à ?start=15 est un comportement de bot.
+   Un humain clique sur le bouton "Page suivante". C'est ce qu'on fait :
+   on localise l'élément <a data-testid="pagination-page-next"> et on clique
+   dessus via Playwright. Indeed voit un clic réel, pas un changement d'URL.
+
+F) Scroll humain progressif
+   Un humain ne lit pas une page instantanément — il fait défiler.
+   La fonction human_scroll() effectue 4 défilements progressifs de 300 à 600
+   pixels chacun, avec des pauses de 0.3 à 0.8 secondes entre chaque.
+   Cela imite la lecture d'une page de résultats.
+
+G) Délais aléatoires longs
+   Entre chaque page, on attend un délai aléatoire entre 5 et 9 secondes.
+   Aléatoire pour éviter les patterns réguliers (un humain ne clique pas
+   exactement toutes les 6 secondes), et long pour laisser Indeed "respirer".
+   Les premières versions utilisaient 2-4.5 secondes — trop court, Indeed
+   bloquait à partir de la page 2.
+
+H) Retry automatique
+   Si une page timeout ou est bloquée, on attend 8 à 15 secondes et on retente
+   jusqu'à 2 fois. Si toutes les tentatives échouent, on passe à la suite
+   plutôt que de faire planter tout le scraping.
+
+─────────────────────────────────────
+3.4 EXTRACTION DES OFFRES : extract_offers_from_page()
+─────────────────────────────────────
+
+Une fois la page chargée, on extrait les données de chaque carte d'offre.
+Indeed structure ses résultats en "cards" : des blocs HTML indépendants,
+un par offre. Le sélecteur CSS principal est "div.job_seen_beacon".
+
+Pour chaque card, on localise les sous-éléments :
+  - Titre     : h2.jobTitle span[title]  → attribut title (plus stable que inner_text)
+  - Entreprise: span[data-testid='company-name']
+  - Lieu      : div[data-testid='text-location']
+  - Salaire   : div[data-testid='attribute_snippet_testid']
+  - Description: div.job-snippet
+  - Lien      : a[data-jk]  →  data-jk est le job key unique d'Indeed
+
+Le "job key" (attribut data-jk) est utilisé pour construire l'URL :
+    https://fr.indeed.com/viewjob?jk={job_key}
+C'est plus fiable que le href direct, qui peut changer.
+
+ATTENTION : Indeed modifie régulièrement ses sélecteurs CSS. Si le scraper
+ne trouve plus d'offres, la première chose à faire est d'inspecter le DOM
+d'une page Indeed avec les DevTools du navigateur (F12) et identifier
+les nouveaux sélecteurs.
+
+─────────────────────────────────────
+3.5 EXPORT STANDALONE (CSV ET JSON)
+─────────────────────────────────────
+
+Le scraper peut aussi tourner de manière autonome, sans l'API ni la base de
+données. La commande "python scrapers/indeed.py" lance le scraping et sauvegarde
+les résultats dans :
+  - data/indeed_offers.csv   : format tabulaire, ouvrable avec Excel
+  - data/indeed_offers.json  : format lisible par machine, pour d'autres outils
+
+Ces fichiers sont dans .gitignore pour ne pas versionner des données potentiellement
+volumineuses ou sensibles.
+
+
+════════════════════════════════════════════════════════════════════════════════
+4. COUCHE PIPELINE — pipeline/deduplicator.py
+════════════════════════════════════════════════════════════════════════════════
+
+─────────────────────────────────────
+4.1 POURQUOI UNE DÉDUPLICATION ?
+─────────────────────────────────────
+
+Quand le scraper tourne toutes les 6 heures, il va récupérer des offres qui
+ont déjà été collectées lors du passage précédent. Sans déduplication :
+  - La base de données grossit inutilement
+  - Les mêmes offres apparaissent plusieurs fois dans l'interface
+  - Les stats sont faussées
+
+De plus, une même offre peut être publiée simultanément sur plusieurs sources
+(même poste, même entreprise, mais sur Indeed ET HelloWork). Les URLs sont
+différentes, mais le contenu est identique — c'est aussi un doublon.
+
+─────────────────────────────────────
+4.2 DEUX NIVEAUX DE DÉDUPLICATION
+─────────────────────────────────────
+
+Niveau 1 — Par URL (exact, rapide)
+   Chaque offre a un URL unique (le job key Indeed par exemple).
+   La table SQLite a une contrainte UNIQUE sur la colonne "url".
+   Toute tentative d'INSERT avec une URL déjà présente est silencieusement
+   ignorée par SQLite (INSERT OR IGNORE). C'est la défense principale,
+   gérée directement par la base de données sans code Python supplémentaire.
+
+Niveau 2 — Par empreinte de contenu (inter-sources)
+   Pour détecter les doublons entre sources différentes (même offre sur
+   Indeed et HelloWork), on calcule une empreinte basée sur :
+       - Le titre normalisé (minuscules, espaces retirés)
+       - Le nom de l'entreprise normalisé
+       - La localisation normalisée
+
+   Ces trois champs concaténés sont passés dans MD5, qui produit un hash
+   hexadécimal de 32 caractères. Si deux offres ont le même hash, elles sont
+   considérées identiques même si leurs URLs diffèrent.
+
+   Exemple :
+       Offre Indeed : "Data Analyst | TotalEnergies | Paris"  → hash ABC123
+       Offre HelloWork : "Data Analyst | TotalEnergies | Paris"  → hash ABC123
+       → Doublon détecté, une seule offre insérée.
+
+─────────────────────────────────────
+4.3 ORDRE DES VÉRIFICATIONS DANS deduplicate()
+─────────────────────────────────────
+
+Pour un batch d'offres fraîchement scrapées, l'ordre est :
+
+    1. Déduplication interne au batch
+       (deux offres dans le même lot avec la même URL ou empreinte)
+
+    2. Vérification contre la base de données
+       (l'URL existe-t-elle déjà ?)
+
+    3. Les offres qui passent ces deux filtres sont les "nouvelles"
+
+Ce tri en amont est important : si on insère directement sans filtrer,
+on génère autant de requêtes SQL que d'offres. Avec le filtre préalable,
+on n'insère que ce qui est vraiment nouveau.
+
+─────────────────────────────────────
+4.4 FONCTION process_and_save()
+─────────────────────────────────────
+
+C'est le point d'entrée du pipeline, appelé par l'API après chaque scraping.
+Elle accepte aussi bien des objets JobOffer (dataclass) que des dictionnaires,
+pour plus de flexibilité. Elle affiche un résumé clair :
+
+    [pipeline] 75 offres reçues → 12 nouvelles → 12 insérées
+
+"Reçues" = total scrapé, "nouvelles" = après déduplication, "insérées" = confirmées en BDD.
+
+
+════════════════════════════════════════════════════════════════════════════════
+5. COUCHE DATABASE — database/db.py
+════════════════════════════════════════════════════════════════════════════════
+
+─────────────────────────────────────
+5.1 CHOIX DE SQLITE
+─────────────────────────────────────
+
+On aurait pu choisir PostgreSQL (plus robuste, adapté à la production) ou MySQL.
+SQLite a été choisi pour ces raisons :
+
+  - Zéro configuration : pas de serveur à démarrer, pas de compte à créer.
+    La base est un simple fichier (data/offers.db).
+  - Fonctionne en local sur n'importe quel PC
+  - Python intègre sqlite3 dans sa bibliothèque standard (pas de dépendance)
+  - Parfaitement adapté pour ce volume de données (quelques milliers d'offres)
+  - Facile à inspecter avec des outils comme DB Browser for SQLite
+
+Quand le projet grandira (plusieurs sources, milliers d'utilisateurs),
+la migration vers PostgreSQL sera naturelle — la couche db.py est la seule
+à modifier.
+
+─────────────────────────────────────
+5.2 SCHÉMA DE LA TABLE offers
+─────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS offers (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        title         TEXT    NOT NULL,
+        company       TEXT    DEFAULT '',
+        location      TEXT    DEFAULT '',
+        contract_type TEXT    DEFAULT 'Alternance',
+        salary        TEXT    DEFAULT '',
+        description   TEXT    DEFAULT '',
+        url           TEXT    UNIQUE,       ← contrainte principale anti-doublon
+        source        TEXT    DEFAULT '',
+        scraped_at    TEXT    DEFAULT '',
+        created_at    TEXT    DEFAULT (datetime('now'))
+    )
+
+Points importants :
+  - url est UNIQUE → SQLite rejette automatiquement les doublons par URL
+  - created_at a une valeur par défaut automatique (datetime('now'))
+  - Trois index sont créés sur source, location et created_at pour accélérer
+    les requêtes filtrées du frontend
+
+─────────────────────────────────────
+5.3 GESTIONNAIRE DE CONNEXION : get_conn()
+─────────────────────────────────────
+
+Chaque accès à SQLite passe par ce gestionnaire de contexte :
+
+    with get_conn() as conn:
+        conn.execute("SELECT ...")
+
+Il garantit :
+  - commit() automatique si tout se passe bien
+  - rollback() automatique en cas d'exception (intégrité des données)
+  - close() de la connexion dans tous les cas
+  - row_factory = sqlite3.Row : les résultats sont accessibles par nom
+    de colonne (row["title"]) plutôt que par index (row[1])
+
+─────────────────────────────────────
+5.4 FONCTION get_offers() — REQUÊTE PRINCIPALE
+─────────────────────────────────────
+
+C'est la requête la plus complexe du projet. Elle supporte :
+
+  - Recherche fulltext sur titre + entreprise + description (opérateur LIKE)
+  - Filtre par localisation (LIKE, donc "Par" matche "Paris")
+  - Filtre par source exacte ("indeed", "hellowork"...)
+  - Pagination : LIMIT + OFFSET calculés à partir de page et per_page
+
+La construction dynamique du WHERE évite les injections SQL en passant
+les paramètres via des placeholders (?) et non par concaténation de chaînes.
+
+Retourne un tuple (liste_offres, total) pour que le frontend puisse
+calculer le nombre de pages sans faire une deuxième requête.
+
+─────────────────────────────────────
+5.5 FONCTION get_stats()
+─────────────────────────────────────
+
+Retourne en une seule lecture :
+  - Le nombre total d'offres en base
+  - Le nombre d'offres par source (pour la barre de stats du frontend)
+  - La date du dernier scraping (MAX de scraped_at)
+
+Ces données alimentent la barre bleue en haut du site vitrine.
+
+
+════════════════════════════════════════════════════════════════════════════════
+6. COUCHE API — api/main.py
+════════════════════════════════════════════════════════════════════════════════
+
+─────────────────────────────────────
+6.1 POURQUOI UNE API REST ?
+─────────────────────────────────────
+
+On aurait pu faire un site web "monolithique" en Python (Flask avec des templates
+Jinja, par exemple) où le serveur génère directement les pages HTML.
+
+On a choisi une architecture API + frontend séparé pour plusieurs raisons :
+
+  - Séparation des responsabilités : l'API ne sait pas comment les données
+    sont affichées. Le frontend ne sait pas d'où viennent les données.
+  - Extensibilité : un jour, une app mobile pourra consommer la même API.
+  - Testabilité : on peut tester l'API avec curl ou Postman indépendamment
+    du frontend.
+  - Modernité : c'est l'architecture standard des applications web actuelles.
+
+─────────────────────────────────────
+6.2 FASTAPI
+─────────────────────────────────────
+
+FastAPI est un framework Python moderne pour construire des APIs REST.
+Ses avantages par rapport à Flask :
+
+  - Asynchrone natif (async/await) : crucial pour ne pas bloquer pendant
+    le scraping
+  - Validation automatique des paramètres via les annotations de types
+  - Documentation interactive auto-générée accessible sur /docs
+  - Performance : l'une des frameworks Python les plus rapides
+
+─────────────────────────────────────
+6.3 LE SCHEDULER : SCRAPING AUTOMATIQUE TOUTES LES 6H
+─────────────────────────────────────
+
+APScheduler (Advanced Python Scheduler) est intégré directement dans l'API.
+Au démarrage, on crée un job avec trigger="interval", hours=6.
+
+Le scheduler tourne dans la même boucle asyncio que FastAPI, ce qui signifie
+qu'il peut appeler des fonctions async sans problème.
+
+Si la base est vide au premier démarrage (première utilisation), un scraping
+est lancé immédiatement sans attendre 6 heures.
+
+─────────────────────────────────────
+6.4 PROBLÈME WINDOWS ET SOLUTION THREADPOOLEXECUTOR
+─────────────────────────────────────
+
+C'est le bug le plus technique du projet, et il mérite une explication détaillée.
+
+CONTEXTE :
+Python's asyncio utilise un "event loop" (boucle d'événements) pour gérer
+les opérations asynchrones. Il en existe deux types sur Windows :
+  - SelectorEventLoop (défaut) : limité, ne supporte pas les sous-processus
+  - ProactorEventLoop : complet, supporte les sous-processus
+
+Playwright a besoin de lancer Chromium en sous-processus via
+asyncio.create_subprocess_exec. Cette fonction requiert ProactorEventLoop.
+
+PROBLÈME :
+Uvicorn (le serveur qui fait tourner FastAPI) utilise SelectorEventLoop
+sur Windows, même si on définit WindowsProactorEventLoopPolicy avant le
+démarrage. De plus, avec l'option --reload, uvicorn spawn un processus enfant
+qui crée sa propre boucle — SelectorEventLoop — sans hériter de notre policy.
+
+SOLUTION :
+On exécute le scraping dans un thread séparé qui crée son propre ProactorEventLoop,
+totalement indépendant de la boucle FastAPI.
+
+    def _scrape_sync():
+        loop = asyncio.ProactorEventLoop()   ← son propre loop
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())      ← scraping ici
+        loop.close()
+
+    async def run_scraping_job():
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, _scrape_sync)
+                   ↑
+            ThreadPoolExecutor(max_workers=1)
+            → un seul thread dédié au scraping
+            → pas deux scrapers en parallèle
+
+Le ThreadPoolExecutor avec max_workers=1 garantit qu'un seul scraping
+tourne à la fois, même si le bouton "Actualiser" est cliqué pendant qu'un
+scraping est déjà en cours.
+
+─────────────────────────────────────
+6.5 ENDPOINTS DE L'API
+─────────────────────────────────────
+
+GET /
+    Sert la page HTML du frontend (index.html).
+    C'est ce qu'on voit en ouvrant http://localhost:8000.
+
+GET /api/offres
+    Paramètres optionnels :
+      - search   : texte libre recherché dans titre, entreprise, description
+      - location : filtre sur la ville (partiel, "Par" → Paris)
+      - source   : filtre exact sur la source ("indeed")
+      - page     : numéro de page (défaut 1)
+      - per_page : résultats par page (défaut 20, max 100)
+
+    Retourne :
+      {
+        "offers"  : [...],    ← liste des offres
+        "total"   : 1250,     ← total correspondant aux filtres
+        "page"    : 1,
+        "per_page": 20,
+        "pages"   : 63        ← nombre de pages total
+      }
+
+GET /api/stats
+    Retourne :
+      {
+        "total"     : 1250,
+        "by_source" : {"indeed": 1250},
+        "last_scrape": "2026-04-07T06:00:00"
+      }
+
+GET /api/sources
+    Retourne la liste des sources disponibles pour peupler le select
+    du frontend : ["indeed", "hellowork", ...]
+
+POST /api/scrape
+    Déclenche un scraping manuel immédiat en arrière-plan.
+    Retourne immédiatement {"message": "Scraping lancé en arrière-plan"}.
+    C'est ce qu'appelle le bouton "Actualiser maintenant" du site.
+
+─────────────────────────────────────
+6.6 CORS
+─────────────────────────────────────
+
+CORS (Cross-Origin Resource Sharing) est un mécanisme de sécurité des navigateurs
+qui empêche une page web d'appeler une API sur un domaine différent.
+
+En développement, si le frontend tourne sur localhost:3000 et l'API sur
+localhost:8000, le navigateur bloquerait les appels sans CORS configuré.
+On a activé allow_origins=["*"] (tous les domaines autorisés) pour simplifier
+le développement. En production, il faudra restreindre à l'URL du site.
+
+─────────────────────────────────────
+6.7 CYCLE DE VIE (LIFESPAN)
+─────────────────────────────────────
+
+FastAPI utilise un gestionnaire de contexte "lifespan" pour exécuter du code
+au démarrage et à l'arrêt de l'application :
+
+  Démarrage :
+    1. init_db()            → crée la table si elle n'existe pas
+    2. scheduler.start()    → lance le cron job des 6h
+    3. Si base vide → scraping immédiat
+
+  Arrêt (Ctrl+C) :
+    scheduler.shutdown()    → arrêt propre du scheduler
+
+
+════════════════════════════════════════════════════════════════════════════════
+7. COUCHE FRONTEND — frontend/
+════════════════════════════════════════════════════════════════════════════════
+
+─────────────────────────────────────
+7.1 CHOIX TECHNIQUE : HTML/CSS/JS VANILLA + TAILWIND CDN
+─────────────────────────────────────
+
+On aurait pu utiliser React, Vue ou Angular. On a choisi HTML/JS vanilla pour :
+
+  - Simplicité : pas de build step (npm run build, webpack, vite...)
+  - Lisibilité : le code est directement lisible, sans JSX ni templates
+  - Légèreté : aucune dépendance à télécharger côté frontend
+  - Accessibilité pour l'équipe : tout le monde sait lire du HTML/JS basique
+
+Tailwind CSS est chargé via CDN (un simple tag script) pour le style utilitaire.
+Les classes Tailwind (flex, gap-4, rounded-lg, etc.) évitent d'écrire du CSS
+pour les mises en page communes. Le fichier style.css contient uniquement les
+styles spécifiques au projet (cards, pagination, toast).
+
+─────────────────────────────────────
+7.2 index.html — STRUCTURE DE LA PAGE
+─────────────────────────────────────
+
+La page est divisée en 5 zones :
+
+  1. HEADER (sticky, reste visible au scroll)
+     Logo + nom du projet + bouton "Actualiser maintenant"
+
+  2. BARRE DE STATS (fond bleu)
+     Total des offres | Nombre par source | Date de dernière collecte
+     Ces données sont chargées dynamiquement depuis GET /api/stats
+
+  3. BARRE DE FILTRES
+     - Input texte : recherche libre (titre, entreprise, description)
+     - Input texte : filtre localisation
+     - Select : filtre par source (peuplé depuis GET /api/sources)
+     - Bouton "Réinitialiser"
+
+  4. GRILLE DES OFFRES (2 colonnes sur desktop)
+     Cards générées dynamiquement par JavaScript
+     États possibles : chargement (spinner), vide (message), offres
+
+  5. PAGINATION
+     Boutons numérotés avec ellipses pour les grandes plages
+
+─────────────────────────────────────
+7.3 app.js — LOGIQUE JAVASCRIPT
+─────────────────────────────────────
+
+Au chargement de la page (DOMContentLoaded) :
+    loadStats()    → remplit la barre bleue
+    loadSources()  → peuple le select des sources
+    loadOffers(1)  → charge la première page d'offres
+
+RECHERCHE AVEC DEBOUNCE :
+Quand l'utilisateur tape dans le champ de recherche, on ne veut pas envoyer
+une requête à l'API à chaque frappe — c'est 10 requêtes pour "alternance".
+On utilise un debounce : on attend 400ms d'inactivité avant d'envoyer.
+Si l'utilisateur tape rapidement, le timer est réinitialisé à chaque frappe.
+
+    let debounceTimer = null;
+    function debouncedSearch() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => loadOffers(1), 400);
+    }
+
+RENDU DES CARDS :
+La fonction renderCard() génère le HTML d'une carte à partir des données JSON.
+Elle utilise escapeHtml() pour prévenir les injections XSS : si une offre
+contient <script>alert("hack")</script> dans son titre, ce code serait exécuté
+dans le navigateur sans cette protection. escapeHtml() convertit les caractères
+spéciaux HTML en entités (&lt; &gt; etc.).
+
+PAGINATION INTELLIGENTE :
+La fonction pagesRange() génère une plage de boutons avec des "..." pour
+éviter d'afficher 60 boutons sur une longue liste :
+    [1] [2] [3] [4] [5] [...] [63]
+    ou pour une page au milieu :
+    [1] [...] [30] [31] [32] [...] [63]
+
+─────────────────────────────────────
+7.4 style.css — STYLES SPÉCIFIQUES
+─────────────────────────────────────
+
+Le fichier CSS contient principalement :
+
+  - .offer-card : la carte d'offre avec hover effect (ombre + léger soulèvement)
+  - .offer-description : texte tronqué à 3 lignes (-webkit-line-clamp)
+  - .source-badge : pastille bleue avec le nom de la source
+  - .page-btn : boutons de pagination
+  - .toast : notification toast (slide + fade in/out) qui apparaît lors du
+    clic sur "Actualiser maintenant"
+
+
+════════════════════════════════════════════════════════════════════════════════
+8. POINT D'ENTRÉE — run.py
+════════════════════════════════════════════════════════════════════════════════
+
+run.py est le seul fichier à exécuter pour lancer l'ensemble du projet :
+
+    python run.py
+
+Il fait une chose simple mais cruciale sur Windows : définir
+WindowsProactorEventLoopPolicy AVANT de charger uvicorn.
+
+Cela force la boucle asyncio principale à utiliser ProactorEventLoop dès
+le début, avant que uvicorn ne crée sa propre boucle. Même si cela ne résout
+pas complètement le problème avec --reload (résolu par le thread executor),
+cela garantit un environnement cohérent.
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    import uvicorn
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+════════════════════════════════════════════════════════════════════════════════
+9. DÉPENDANCES — requirements.txt
+════════════════════════════════════════════════════════════════════════════════
+
+    playwright>=1.44.0
+        Pilotage de Chromium pour le scraping de sites JavaScript
+        Installation en deux étapes : pip install playwright && playwright install chromium
+
+    pandas>=2.2.0
+        Manipulation de données tabulaires (préparation pour la phase NLP)
+
+    fastapi>=0.111
+        Framework web asynchrone pour l'API REST
+
+    uvicorn[standard]>=0.29
+        Serveur ASGI qui fait tourner FastAPI
+        La variante [standard] inclut watchfiles (auto-reload) et httptools
+
+    apscheduler>=3.10
+        Scheduler pour le cron job du scraping automatique
+
+    python-multipart>=0.0.9
+        Requis par FastAPI pour les formulaires (bonne pratique de l'inclure)
+
+
+════════════════════════════════════════════════════════════════════════════════
+10. FLUX DE DONNÉES COMPLET
+════════════════════════════════════════════════════════════════════════════════
+
+Voici le flux complet d'une exécution automatique (toutes les 6h) :
+
+    1. APScheduler déclenche run_scraping_job() dans la boucle FastAPI
+
+    2. run_scraping_job() délègue à _scrape_sync() via ThreadPoolExecutor
+
+    3. _scrape_sync() crée un ProactorEventLoop et lance IndeedScraper.run()
+
+    4. IndeedScraper :
+       a. Warm-up sur fr.indeed.com (visite + scroll)
+       b. Chargement de la page 1 de résultats
+       c. Extraction des cards → liste de JobOffer
+       d. Scroll humain, pause 5-9s
+       e. Clic sur "Suivant" → page 2
+       f. Répétition jusqu'à MAX_PAGES (5 pages ≈ 75 offres)
+
+    5. Les 75 JobOffer sont passés à process_and_save() (pipeline)
+
+    6. Déduplication :
+       a. Suppression des doublons internes au batch (par URL et empreinte)
+       b. Vérification contre la BDD (url_exists())
+       → Résultat : X nouvelles offres (ex: 12)
+
+    7. insert_offers_bulk() insère les 12 nouvelles offres en SQLite
+       (INSERT OR IGNORE pour les éventuels doublons restants)
+
+    8. Log : "[pipeline] 75 offres reçues → 12 nouvelles → 12 insérées"
+
+    9. La prochaine exécution est planifiée dans 6h
+
+Et côté frontend (quand un utilisateur consulte le site) :
+
+    1. Navigateur → GET http://localhost:8000/
+       → FastAPI sert index.html
+
+    2. index.html charge style.css et app.js
+
+    3. app.js → GET /api/stats    → remplit la barre de stats
+    4. app.js → GET /api/sources  → peuple le select
+    5. app.js → GET /api/offres?page=1&per_page=20 → affiche les 20 premières offres
+
+    6. L'utilisateur tape "data" dans la recherche
+       → debounce 400ms
+       → GET /api/offres?search=data&page=1
+       → affichage des résultats filtrés
+
+
+════════════════════════════════════════════════════════════════════════════════
+11. COMMENT LANCER LE PROJET
+════════════════════════════════════════════════════════════════════════════════
+
+Installation (une seule fois) :
+    python -m venv .venv
+    .venv/Scripts/activate         (Windows)
+    pip install -r requirements.txt
+    playwright install chromium
+
+Lancer le serveur :
+    python run.py
+
+Accéder au site :
+    http://localhost:8000
+
+Documentation API interactive :
+    http://localhost:8000/docs
+
+Lancer le scraper seul (sans le serveur) :
+    python scrapers/indeed.py
+
+
+════════════════════════════════════════════════════════════════════════════════
+12. ROADMAP — PHASES SUIVANTES
+════════════════════════════════════════════════════════════════════════════════
+
+Phase 2 — Nouvelles sources
+    - scrapers/hellowork.py   (même modèle JobOffer, même interface)
+    - scrapers/apec.py
+    - scrapers/linkedin.py
+    Chaque nouveau scraper s'intègre sans modifier le pipeline ni la BDD.
+
+Phase 3 — NLP (Traitement du langage naturel)
+    - Extraction automatique des compétences demandées (spaCy ou BERT)
+      "Python, SQL, PowerBI" extraits de la description
+    - Classification par domaine (data, web, cyber, RH, finance...)
+    - Score de similarité entre offres (détection de doublons sémantiques)
+    - Score de pertinence par rapport à un profil utilisateur
+
+Phase 4 — Recommandation
+    - Profil utilisateur (compétences, domaine souhaité, localisation)
+    - Calcul d'un score de pertinence pour chaque offre
+    - Classement personnalisé des résultats
+
+Phase 5 — Production
+    - Migration SQLite → PostgreSQL
+    - Docker Compose (API + BDD dans des conteneurs)
+    - Déploiement sur un VPS ou service cloud
+    - Authentification utilisateur
+
+================================================================================
+FIN DE LA DOCUMENTATION
+================================================================================
