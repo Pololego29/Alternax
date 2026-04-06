@@ -20,6 +20,7 @@ Le site vitrine est servi depuis frontend/ sur http://localhost:8000
 
 import asyncio
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,6 +29,9 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+# Executor dédié au scraping (1 seul thread — on ne veut pas plusieurs scrapers en parallèle)
+_scraper_executor = ThreadPoolExecutor(max_workers=1)
 
 # Ajoute la racine du projet au path pour les imports relatifs
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,19 +45,43 @@ from scrapers.indeed import IndeedScraper
 # SECTION 1 – TÂCHE DE SCRAPING
 # =============================================================================
 
-async def run_scraping_job() -> None:
+def _scrape_sync() -> None:
     """
-    Tâche lancée par le scheduler toutes les 6h.
+    Version synchrone du scraping, exécutée dans un thread dédié.
 
-    Lance le scraper Indeed, puis passe les résultats dans le pipeline
-    de déduplication avant insertion en base.
+    Sur Windows, uvicorn utilise SelectorEventLoop qui ne supporte pas
+    asyncio.create_subprocess_exec (requis par Playwright). En lançant
+    le scraper dans un thread séparé, on crée un ProactorEventLoop
+    indépendant de celui de FastAPI — compatible avec Playwright.
     """
-    print("\n[scheduler] Démarrage du scraping automatique...")
-    try:
+    # Nouveau ProactorEventLoop dans ce thread (indépendant de FastAPI)
+    if sys.platform == "win32":
+        loop = asyncio.ProactorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def _run():
         scraper = IndeedScraper(query="alternance", location="France", max_pages=5)
         offers = await scraper.run()
         inserted = process_and_save(offers)
         print(f"[scheduler] Scraping terminé — {inserted} nouvelles offres ajoutées")
+
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+
+async def run_scraping_job() -> None:
+    """
+    Tâche lancée par le scheduler toutes les 6h.
+    Délègue le scraping à un thread avec son propre event loop (fix Windows).
+    """
+    print("\n[scheduler] Démarrage du scraping automatique...")
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(_scraper_executor, _scrape_sync)
     except Exception as e:
         print(f"[scheduler] Erreur durant le scraping : {e}")
 
