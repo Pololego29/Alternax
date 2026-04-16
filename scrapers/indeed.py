@@ -35,19 +35,21 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # Cela facilite la déduplication et le traitement en pipeline.
 # =============================================================================
 
+from dataclasses import dataclass, asdict, fields, field # Ajout de 'field' à tes imports en haut si nécessaire
+
 @dataclass
 class JobOffer:
     """Représente une offre d'alternance normalisée, quelle que soit la source."""
-    title: str
-    company: str
-    location: str
-    contract_type: str
-    salary: str
-    description: str
-    url: str
-    source: str
-    # Utilisation de default_factory pour avoir l'heure exacte à l'instanciation
-    scraped_at: str = None 
+    title: str          # Intitulé du poste
+    company: str        # Nom de l'entreprise
+    location: str       # Ville / région
+    contract_type: str  # Type de contrat (toujours "Alternance" ici)
+    salary: str         # Rémunération si disponible, sinon ""
+    description: str    # Extrait de la description
+    url: str            # Lien vers l'offre complète
+    source: str         # Identifiant de la source ("indeed", "hellowork"…)
+    # Modification Ikram : Génération automatique de l'horodatage
+    scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def __post_init__(self):
         if self.scraped_at is None:
