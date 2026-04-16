@@ -171,7 +171,7 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
             job_key = await link_el.get_attribute("data-jk") if link_el else ""
             url = f"https://fr.indeed.com/viewjob?jk={job_key}" if job_key else ""
 
-  if not title:
+            if not title:
                 continue
 
             # --- DÉBUT MODIFICATION IKRAM : Instanciation allégée ---
