@@ -171,9 +171,10 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
             job_key = await link_el.get_attribute("data-jk") if link_el else ""
             url = f"https://fr.indeed.com/viewjob?jk={job_key}" if job_key else ""
 
-            if not title:
+  if not title:
                 continue
 
+            # --- DÉBUT MODIFICATION IKRAM : Instanciation allégée ---
             offers.append(JobOffer(
                 title=title,
                 company=company,
@@ -182,9 +183,11 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
                 salary=salary,
                 description=desc,
                 url=url,
-                source="indeed",
-                scraped_at=datetime.now().isoformat(),
+                source="indeed"
+                # La ligne 'scraped_at' est supprimée ! 
+                # Le modèle s'en charge tout seul grâce à notre modification de l'Étape 1.
             ))
+            # --- FIN MODIFICATION ---
 
         except Exception as e:
             print(f"  [warn] Erreur extraction card : {e}")
