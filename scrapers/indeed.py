@@ -38,15 +38,20 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 @dataclass
 class JobOffer:
     """Représente une offre d'alternance normalisée, quelle que soit la source."""
-    title: str          # Intitulé du poste
-    company: str        # Nom de l'entreprise
-    location: str       # Ville / région
-    contract_type: str  # Type de contrat (toujours "Alternance" ici)
-    salary: str         # Rémunération si disponible, sinon ""
-    description: str    # Extrait de la description
-    url: str            # Lien vers l'offre complète
-    source: str         # Identifiant de la source ("indeed", "hellowork"…)
-    scraped_at: str     # Horodatage ISO 8601 de la collecte
+    title: str
+    company: str
+    location: str
+    contract_type: str
+    salary: str
+    description: str
+    url: str
+    source: str
+    # Utilisation de default_factory pour avoir l'heure exacte à l'instanciation
+    scraped_at: str = None 
+
+    def __post_init__(self):
+        if self.scraped_at is None:
+            self.scraped_at = datetime.now().isoformat()
 
 
 # =============================================================================
@@ -127,7 +132,7 @@ async def is_blocked(page) -> bool:
 async def extract_offers_from_page(page) -> list[JobOffer]:
     """
     Extrait toutes les offres présentes sur la page Indeed actuellement chargée.
-
+    Modifié par Ikram : Ajout de logs de suivi et sécurisation des sélecteurs.
     Note : Indeed change régulièrement ses sélecteurs CSS.
     Si le scraper cesse de fonctionner, inspecter le DOM avec les DevTools
     et mettre à jour les sélecteurs ci-dessous.
@@ -140,10 +145,17 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
     """
     offers = []
 
-    # Sélecteurs principaux + fallback si Indeed change sa structure
+  # Sélecteurs principaux + fallback si Indeed change sa structure
     cards = await page.query_selector_all("div.job_seen_beacon")
-    if not cards:
+    
+    # --- DÉBUT MODIFICATION IKRAM : Tracking de l'extraction ---
+    if cards:
+        print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur principal).")
+    else:
         cards = await page.query_selector_all("li.css-5lfssm")
+        if cards:
+            print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur secondaire).")
+    # --- FIN MODIFICATION ---
 
     if not cards:
         print("  [warn] Aucune card trouvée — sélecteurs à mettre à jour ou page bloquée")
