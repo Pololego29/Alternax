@@ -130,38 +130,28 @@ async def is_blocked(page) -> bool:
 # =============================================================================
 # SECTION 4 – EXTRACTION D'UNE PAGE DE RÉSULTATS
 # =============================================================================
-
 async def extract_offers_from_page(page) -> list[JobOffer]:
     """
     Extrait toutes les offres présentes sur la page Indeed actuellement chargée.
-    Modifié par Ikram : Ajout de logs de suivi et sécurisation des sélecteurs.
-    Note : Indeed change régulièrement ses sélecteurs CSS.
-    Si le scraper cesse de fonctionner, inspecter le DOM avec les DevTools
-    et mettre à jour les sélecteurs ci-dessous.
-
-    Args:
-        page : Objet Playwright représentant l'onglet du navigateur
-
-    Returns:
-        Liste d'objets JobOffer extraits de la page
     """
     offers = []
 
-  # Sélecteurs principaux + fallback si Indeed change sa structure
+    # --- DÉBUT MODIFICATION IKRAM : Sélecteurs et Logs ---
+    # Sélecteurs principaux + fallback si Indeed change sa structure
     cards = await page.query_selector_all("div.job_seen_beacon")
     
-    # --- DÉBUT MODIFICATION IKRAM : Tracking de l'extraction ---
     if cards:
         print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur principal).")
     else:
         cards = await page.query_selector_all("li.css-5lfssm")
         if cards:
             print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur secondaire).")
-    # --- FIN MODIFICATION ---
 
     if not cards:
         print("  [warn] Aucune card trouvée — sélecteurs à mettre à jour ou page bloquée")
         return offers
+    # --- FIN MODIFICATION ---
+
 
     for card in cards:
         try:
