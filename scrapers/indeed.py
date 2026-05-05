@@ -20,7 +20,7 @@ import csv
 import json
 import random
 import re
-from dataclasses import dataclass, asdict, fields
+from dataclasses import dataclass, asdict, fields, field
 from datetime import datetime
 from pathlib import Path
 
@@ -35,8 +35,6 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # Cela facilite la déduplication et le traitement en pipeline.
 # =============================================================================
 
-from dataclasses import dataclass, asdict, fields, field # Ajout de 'field' à tes imports en haut si nécessaire
-
 @dataclass
 class JobOffer:
     """Représente une offre d'alternance normalisée, quelle que soit la source."""
@@ -48,7 +46,7 @@ class JobOffer:
     description: str    # Extrait de la description
     url: str            # Lien vers l'offre complète
     source: str         # Identifiant de la source ("indeed", "hellowork"…)
-    # Modification Ikram : Génération automatique de l'horodatage
+    # Génération automatique de l'horodatage
     scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def __post_init__(self):
@@ -99,13 +97,8 @@ def clean_text(text: str | None) -> str:
 async def human_scroll(page, steps: int = 4) -> None:
     """
     Simule un défilement humain sur la page.
-
     Instead of jumping straight to the bottom, on défile progressivement
     avec des pauses courtes — comportement typique d'un utilisateur qui lit.
-
-    Args:
-        page  : Objet Playwright
-        steps : Nombre de paliers de défilement
     """
     for _ in range(steps):
         await page.mouse.wheel(0, random.randint(300, 600))
@@ -115,12 +108,8 @@ async def human_scroll(page, steps: int = 4) -> None:
 async def is_blocked(page) -> bool:
     """
     Détecte si Indeed a affiché une page de blocage / CAPTCHA.
-
     Indeed peut rediriger vers une page de vérification quand il détecte
     un comportement automatisé. On vérifie le titre et le contenu.
-
-    Returns:
-        True si la page semble être un blocage, False sinon
     """
     title = await page.title()
     keywords = ["captcha", "robot", "vérification", "verification", "blocked", "access denied"]
@@ -130,13 +119,14 @@ async def is_blocked(page) -> bool:
 # =============================================================================
 # SECTION 4 – EXTRACTION D'UNE PAGE DE RÉSULTATS
 # =============================================================================
+
 async def extract_offers_from_page(page) -> list[JobOffer]:
     """
     Extrait toutes les offres présentes sur la page Indeed actuellement chargée.
     """
     offers = []
 
-    # --- DÉBUT MODIFICATION IKRAM : Sélecteurs et Logs ---
+    # --- DÉBUT MODIFICATION : Sélecteurs et Logs ---
     # Sélecteurs principaux + fallback si Indeed change sa structure
     cards = await page.query_selector_all("div.job_seen_beacon")
     
@@ -151,7 +141,6 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
         print("  [warn] Aucune card trouvée — sélecteurs à mettre à jour ou page bloquée")
         return offers
     # --- FIN MODIFICATION ---
-
 
     for card in cards:
         try:
@@ -174,7 +163,7 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
             if not title:
                 continue
 
-            # --- DÉBUT MODIFICATION IKRAM : Instanciation allégée ---
+            # --- DÉBUT MODIFICATION : Instanciation allégée ---
             offers.append(JobOffer(
                 title=title,
                 company=company,
@@ -184,8 +173,6 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
                 description=desc,
                 url=url,
                 source="indeed"
-                # La ligne 'scraped_at' est supprimée ! 
-                # Le modèle s'en charge tout seul grâce à notre modification de l'Étape 1.
             ))
             # --- FIN MODIFICATION ---
 
@@ -222,10 +209,6 @@ class IndeedScraper:
     async def _warmup(self, page) -> None:
         """
         Visite la page d'accueil d'Indeed avant de lancer la recherche.
-
-        Indeed est plus suspicieux quand un navigateur arrive directement
-        sur une URL de recherche sans historique. Ce warm-up simule un
-        utilisateur qui ouvre le site normalement.
         """
         print("[indeed] Warm-up sur fr.indeed.com...")
         try:
@@ -238,17 +221,6 @@ class IndeedScraper:
     async def _load_page_with_retry(self, page, url: str, page_num: int) -> bool:
         """
         Charge une page de résultats avec retry automatique.
-
-        En cas de timeout ou de page bloquée, attend un délai plus long
-        et retente jusqu'à MAX_RETRY fois avant d'abandonner.
-
-        Args:
-            page     : Objet Playwright
-            url      : URL à charger
-            page_num : Numéro de page (pour les logs)
-
-        Returns:
-            True si la page est chargée et valide, False si échec définitif
         """
         for attempt in range(1, MAX_RETRY + 1):
             try:
@@ -277,12 +249,6 @@ class IndeedScraper:
     async def _go_to_next_page(self, page) -> bool:
         """
         Clique sur le bouton "Suivant" de la pagination Indeed.
-
-        Naviguer via le bouton est plus naturel qu'une URL directe.
-        Indeed surveille les sauts de pagination trop rapides.
-
-        Returns:
-            True si le clic a réussi, False si le bouton n'existe pas (dernière page)
         """
         try:
             next_btn = await page.query_selector('a[data-testid="pagination-page-next"]')
@@ -310,16 +276,6 @@ class IndeedScraper:
     async def run(self) -> list[JobOffer]:
         """
         Lance le scraping sur toutes les pages configurées.
-
-        Workflow :
-        1. Warm-up sur la page d'accueil
-        2. Chargement de la première page de résultats
-        3. Extraction + scroll humain
-        4. Navigation via bouton Suivant (pages 2 et suivantes)
-        5. Répétition jusqu'à MAX_PAGES ou dernière page
-
-        Returns:
-            Liste complète des offres collectées
         """
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -389,9 +345,10 @@ class IndeedScraper:
         print(f"\n[indeed] Collecte terminée : {len(self.offers)} offres au total")
         return self.offers
 
-    # =========================================================================
-    # SECTION 6 – EXPORT DES DONNÉES
-    # =========================================================================
+
+# =============================================================================
+# SECTION 6 – EXPORT DES DONNÉES
+# =============================================================================
 
     def save_csv(self, filename: str = "indeed_offers.csv") -> Path:
         """Sauvegarde les offres en CSV dans OUTPUT_DIR."""
