@@ -1,5 +1,20 @@
 # Alternax — Agrégateur d'offres d'alternance
 
+Projet réalisé dans le cadre de la matière **Projet de développement**.
+
+## Équipe
+
+**👨‍💼 Scrum Master**
+- **Hakob** — chargé de l'organisation du projet et du bon déroulement du travail en équipe. Il veille à la communication entre les membres, aide à résoudre les blocages et s'assure que les objectifs sont respectés.
+
+**🧠 Product Owner**
+- **Paul** — définit les fonctionnalités principales du projet et les priorise. Il est responsable de la vision globale du produit et des choix fonctionnels (ce qu'on développe en priorité).
+
+**👨‍💻 Développeurs**
+- **Ruben, Paul, Ikram, Yassine** — responsables du développement technique du projet : scraping des données, développement de l'API, gestion de la base de données et création de l'interface web.
+
+---
+
 Alternax est un projet étudiant qui a pour but de centraliser des offres d'alternance sur une seule plateforme.
 
 L'idée est simple : récupérer automatiquement des offres depuis Indeed, les stocker dans une base de données, puis les afficher sur un petit site web avec une recherche, des filtres et une pagination.
