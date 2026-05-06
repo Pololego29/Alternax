@@ -1,167 +1,239 @@
-# Groupax — Agrégateur d'offres d'alternance
+# Alternax — Agrégateur d'offres d'alternance
 
-Plateforme qui collecte automatiquement les offres d'alternance depuis plusieurs sources (Indeed, bientôt HelloWork, APEC…), les déduplique et les expose sur un site web centralisé avec filtres et pagination.
+Plateforme qui collecte automatiquement les offres d'alternance depuis Indeed, les déduplique et les expose sur un site web centralisé avec filtres et pagination.
 
-## Fonctionnalités
+---
 
-- **Scraping automatique** toutes les 6 heures via APScheduler
-- **Déduplication à deux niveaux** : par URL et par empreinte de contenu (titre + entreprise + lieu)
-- **API REST** avec recherche fulltext, filtres et pagination
-- **Interface web** responsive sans framework (HTML/CSS/JS + Tailwind CDN)
-- **Déclenchement manuel** du scraping depuis le bouton "Actualiser" du site
-- Compatible **Windows et macOS/Linux**
+## Équipe
 
-## Architecture
+| Membre | Rôle |
+|---|---|
+| **Paul** | Lead technique — architecture, API FastAPI, déploiement, intégration |
+| **Ikram** | Scraper Indeed (Playwright, anti-détection, pipeline de données) |
+| **Hakob** | Contribution frontend et tests |
+| **Ruben** | Tâches déléguées (tests, revue de code) |
+| **Paul 2** | Tâches déléguées (documentation, tests) |
+| **Yassine** | Tâches déléguées (tests, revue de code) |
+
+Tous les membres ont participé activement au projet. La répartition des commits Git ne reflète pas l'ensemble des contributions — certains membres ont travaillé en pair programming, revue de code ou sur des branches séparées.
+
+---
+
+## Comment ça marche
+
+Le projet suit un pipeline en 4 étapes :
 
 ```
-Scrapers (Playwright)
-    │  Liste de JobOffer
-    ▼
-Pipeline (déduplication MD5)
-    │  Offres uniques
-    ▼
-Database (SQLite)
-    │  Requêtes SQL
-    ▼
-API (FastAPI)
-    │  JSON via HTTP
-    ▼
-Frontend (HTML / JS vanilla)
+┌─────────────────────────────────────────────────────┐
+│  Scraper (Playwright + Chromium)                    │
+│  └── Visite Indeed, extrait les offres page par page│
+└─────────────────────┬───────────────────────────────┘
+                      │ Liste de JobOffer
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  Pipeline de déduplication                          │
+│  └── Filtre par URL (exact) + empreinte MD5         │
+│      (titre + entreprise + lieu)                    │
+└─────────────────────┬───────────────────────────────┘
+                      │ Offres uniques
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  Base de données (SQLite en local)                  │
+│  └── Table offers, index sur source/location/date   │
+└─────────────────────┬───────────────────────────────┘
+                      │ Requêtes SQL
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  API REST (FastAPI)                                 │
+│  └── GET /api/offres  — liste paginée avec filtres  │
+│  └── GET /api/stats   — statistiques globales       │
+│  └── GET /api/sources — sources disponibles         │
+└─────────────────────┬───────────────────────────────┘
+                      │ JSON via HTTP
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  Site vitrine (HTML / CSS / JS vanilla)             │
+│  └── Recherche, filtres, pagination                 │
+└─────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Structure du projet
 
 ```
 Alternax/
-├── run.py                  # Point d'entrée (fix ProactorEventLoop Windows)
-├── requirements.txt
+├── run.py                      # Point d'entrée local (fix Windows ProactorEventLoop)
+├── requirements.txt            # Dépendances API
+├── requirements-scraper.txt    # Dépendances scraper (+ playwright)
+├── Procfile                    # Déploiement Railway
+├── vercel.json                 # Déploiement Vercel (frontend)
+│
 ├── scrapers/
-│   └── indeed.py           # Scraper Indeed France (Playwright)
+│   ├── indeed.py               # Scraper Indeed France (Playwright)
+│   └── run_scraper.py          # Point d'entrée standalone (GitHub Actions)
+│
 ├── pipeline/
-│   └── deduplicator.py     # Déduplication avant insertion BDD
+│   └── deduplicator.py         # Déduplication avant insertion BDD
+│
 ├── database/
-│   └── db.py               # SQLite — schéma, CRUD, connexion
+│   └── db.py                   # SQLite (local) / PostgreSQL (prod) — auto-détecté
+│
 ├── api/
-│   └── main.py             # FastAPI + scheduler APScheduler
+│   └── main.py                 # API FastAPI
+│
 ├── frontend/
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
-└── data/                   # Données locales (gitignorées)
-    ├── offers.db
-    ├── indeed_offers.csv
-    └── indeed_offers.json
+│   ├── app.js
+│   ├── config.js               # URL de l'API (généré au build Vercel)
+│   └── scripts/
+│       └── build.js            # Script de build Vercel
+│
+├── .github/
+│   └── workflows/
+│       └── scrape.yml          # Scraping automatique toutes les 6h (GitHub Actions)
+│
+└── data/                       # Données locales (ignorées par git)
+    └── offers.db
 ```
+
+---
 
 ## Stack technique
 
 | Couche | Technologie |
 |---|---|
 | Scraping | Python · Playwright (Chromium) |
-| Pipeline | Python · hashlib (MD5) |
-| Base de données | SQLite (sqlite3 stdlib) |
-| API | FastAPI · Uvicorn · APScheduler |
+| Anti-détection | headless=False en local, rotation User-Agents, scroll humain, warm-up |
+| Pipeline | Python · hashlib MD5 |
+| Base de données | SQLite (local) · PostgreSQL/Supabase (production) |
+| API | FastAPI · Uvicorn |
+| Automatisation | GitHub Actions (cron toutes les 6h) |
 | Frontend | HTML · CSS · JavaScript vanilla · Tailwind CDN |
+| Déploiement | Vercel (frontend) · Railway (API) |
 
-## Installation
+---
+
+## Lancer le projet en local
+
+### 1. Prérequis
+
+- Python 3.11+
+- Node.js (pour le script de build Vercel, optionnel en local)
+
+### 2. Installation
 
 ```bash
-# 1. Environnement virtuel
+# Créer l'environnement virtuel
 python -m venv .venv
-source .venv/bin/activate      # macOS / Linux
-.venv\Scripts\activate         # Windows
 
-# 2. Dépendances Python
-pip install -r requirements.txt
+# Activer l'environnement
+source .venv/bin/activate        # macOS / Linux
+.venv\Scripts\activate           # Windows
 
-# 3. Navigateur Playwright
+# Installer les dépendances
+pip install -r requirements-scraper.txt
+
+# Installer le navigateur Playwright
 playwright install chromium
 ```
 
-## Lancer le projet
+### 3. Lancer l'API et le site
 
 ```bash
 python run.py
 ```
 
 - Site vitrine → [http://localhost:8000](http://localhost:8000)
-- Documentation API interactive → [http://localhost:8000/docs](http://localhost:8000/docs)
+- Documentation API → [http://localhost:8000/docs](http://localhost:8000/docs)
 
-Au premier démarrage, si la base est vide, un scraping se lance immédiatement. Les suivants s'exécutent automatiquement toutes les 6 heures.
+### 4. Lancer le scraper (remplit la base)
 
-## Lancer le scraper seul (sans serveur)
+Dans un second terminal :
 
 ```bash
-python scrapers/indeed.py
+python -m scrapers.run_scraper
 ```
 
-Exporte les résultats dans `data/indeed_offers.csv` et `data/indeed_offers.json`.
+Un navigateur Chrome s'ouvre, visite Indeed et collecte les offres (2–3 minutes). Une fois terminé, recharge le site — les offres apparaissent.
+
+> **Note :** le scraper ouvre un vrai navigateur visible en local (nécessaire pour éviter la détection d'Indeed). Sur GitHub Actions, il tourne en mode headless invisible.
+
+---
 
 ## Endpoints API
 
 | Méthode | Route | Description |
 |---|---|---|
-| `GET` | `/` | Site vitrine (index.html) |
 | `GET` | `/api/offres` | Liste paginée avec filtres |
-| `GET` | `/api/stats` | Total, par source, dernier scraping |
+| `GET` | `/api/stats` | Total, par source, dernière collecte |
 | `GET` | `/api/sources` | Sources disponibles |
-| `POST` | `/api/scrape` | Déclenche un scraping immédiat |
 
 **Paramètres de `/api/offres` :**
 
-| Paramètre | Type | Description |
+| Paramètre | Description |
+|---|---|
+| `search` | Recherche dans titre, entreprise, description |
+| `location` | Filtre ville/région |
+| `source` | Filtre par source (`indeed`, …) |
+| `page` | Numéro de page (défaut : 1) |
+| `per_page` | Résultats par page (défaut : 20, max : 100) |
+
+---
+
+## Déploiement (production)
+
+L'architecture cible pour un déploiement complet :
+
+```
+GitHub Actions (cron 6h)
+    └── Scraper → écrit dans Supabase (PostgreSQL)
+
+Railway
+    └── API FastAPI → lit Supabase → sert le JSON
+
+Vercel
+    └── Frontend statique → appelle l'API Railway
+```
+
+### Variables d'environnement requises
+
+| Variable | Où | Valeur |
 |---|---|---|
-| `search` | string | Recherche dans titre, entreprise, description |
-| `location` | string | Filtre ville/région (partiel) |
-| `source` | string | Filtre par source (`indeed`, …) |
-| `page` | int | Numéro de page (défaut : 1) |
-| `per_page` | int | Résultats par page (défaut : 20, max : 100) |
+| `DATABASE_URL` | Railway + GitHub Actions Secrets | `postgresql://...` (Supabase) |
+| `API_URL` | Vercel | `https://votre-api.up.railway.app/api` |
+| `FRONTEND_URL` | Railway | `https://votre-app.vercel.app` |
 
-## Modèle de données
+### Étapes
 
-Toute la chaîne repose sur un `dataclass` commun :
+1. Créer une base PostgreSQL sur [Supabase](https://supabase.com) (gratuit)
+2. Déployer l'API sur [Railway](https://railway.app) — connecter le repo GitHub, ajouter `DATABASE_URL`
+3. Déployer le frontend sur [Vercel](https://vercel.com) — connecter le repo GitHub, ajouter `API_URL`
+4. Ajouter `DATABASE_URL` dans les Secrets du repo GitHub (Settings → Secrets → Actions)
+5. Lancer le premier scraping manuellement : onglet Actions → "Scraping Indeed" → "Run workflow"
 
-```python
-@dataclass
-class JobOffer:
-    title         : str   # Intitulé du poste
-    company       : str   # Nom de l'entreprise
-    location      : str   # Ville ou région
-    contract_type : str   # Type de contrat
-    salary        : str   # Rémunération (vide si non renseignée)
-    description   : str   # Extrait de la description
-    url           : str   # Lien unique (clé de déduplication)
-    source        : str   # Identifiant de la source ("indeed"…)
-    scraped_at    : str   # Horodatage ISO 8601
-```
+---
 
-Chaque futur scraper (HelloWork, APEC…) doit retourner des `JobOffer` — le pipeline et la base n'ont pas à changer.
+## Améliorations futures
 
-## Stratégie anti-détection (Indeed)
+- **Sources supplémentaires** — HelloWork, APEC, France Travail (API officielle gratuite)
+- **Recherche avancée** — filtres par secteur, niveau d'études, durée de contrat
+- **NLP** — extraction automatique de compétences requises (spaCy)
+- **Alertes** — notification par email ou webhook quand une nouvelle offre correspond à un profil
+- **Authentification** — sauvegarde de recherches et favoris par utilisateur
 
-Indeed charge ses offres via JavaScript et détecte les bots. Techniques utilisées :
+---
 
-- **`headless=False`** — fenêtre Chromium visible, moins détectable
-- **Masquage de `navigator.webdriver`** — script injecté au démarrage
-- **Rotation des User-Agents** — pool de 4 UA Chrome/Firefox réalistes
-- **Warm-up** — visite de la page d'accueil avant la recherche
-- **Navigation via le bouton "Suivant"** — clics réels, pas d'URLs directes
-- **Scroll humain progressif** — défilement aléatoire par paliers
-- **Délais aléatoires** entre pages (5–9 secondes)
-- **Retry automatique** en cas de timeout (2 tentatives max)
+## Stratégie anti-détection Indeed
 
-## Roadmap
+Indeed détecte les bots et bloque les requêtes automatisées. Techniques mises en place :
 
-- [ ] **Phase 2** — Scrapers HelloWork, APEC, LinkedIn
-- [ ] **Phase 3** — NLP : extraction de compétences, classification par domaine (spaCy / BERT)
-- [ ] **Phase 4** — Recommandation personnalisée par profil utilisateur
-- [ ] **Phase 5** — Production : PostgreSQL · Docker · déploiement VPS
-
-## Dépendances
-
-```
-playwright>=1.44.0       # Pilotage de Chromium
-pandas>=2.2.0            # Manipulation de données (préparation NLP)
-fastapi>=0.111           # Framework API REST asynchrone
-uvicorn[standard]>=0.29  # Serveur ASGI
-apscheduler>=3.10        # Scheduler cron intégré
-python-multipart>=0.0.9  # Formulaires FastAPI
-```
+- Navigateur visible (`headless=False`) en local — moins détectable qu'un headless
+- Masquage de `navigator.webdriver` via script injecté
+- Rotation de 4 User-Agents Chrome/Firefox réalistes
+- Warm-up : visite de la page d'accueil avant la recherche
+- Navigation via le bouton "Suivant" (clics réels, pas d'URLs directes)
+- Scroll progressif simulant un comportement humain
+- Délais aléatoires entre les pages (5–9 secondes)
+- Retry automatique en cas de timeout (2 tentatives)
