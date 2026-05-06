@@ -228,6 +228,19 @@ class IndeedScraper:
         self.max_pages = max_pages
         self.offers: list[JobOffer] = []
         self._seen_urls: set[str] = set()  # dédup intra-run
+        self.stats: dict = {
+            "query": query,
+            "location": location,
+            "max_pages": max_pages,
+            "started_at": None,
+            "ended_at": None,
+            "duration_seconds": 0.0,
+            "pages_scraped": 0,
+            "pages_blocked": 0,
+            "offers_total": 0,
+            "offers_new": 0,
+            "offers_duplicates": 0,
+        }
 
     def _add_offers(self, new_offers: list[JobOffer]) -> int:
         """Ajoute les offres en filtrant les doublons (même URL) déjà vus dans cette session."""
@@ -239,6 +252,9 @@ class IndeedScraper:
             self._seen_urls.add(key)
             self.offers.append(o)
             added += 1
+        self.stats["offers_new"] += added
+        self.stats["offers_duplicates"] += len(new_offers) - added
+        self.stats["pages_scraped"] += 1
         return added
 
     async def _warmup(self, page) -> None:
@@ -312,8 +328,13 @@ class IndeedScraper:
         """
         Lance le scraping sur toutes les pages configurées.
         """
+<<<<<<< HEAD
         import os
         headless = os.environ.get("HEADLESS", "0") == "1"
+=======
+        start = datetime.now()
+        self.stats["started_at"] = start.isoformat()
+>>>>>>> 78896e1 (stats)
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=headless,
@@ -370,6 +391,7 @@ class IndeedScraper:
 
                 if await is_blocked(page):
                     print("  [warn] Page bloquée après navigation — arrêt")
+                    self.stats["pages_blocked"] += 1
                     break
 
                 await human_scroll(page)
@@ -379,8 +401,25 @@ class IndeedScraper:
 
             await browser.close()
 
-        print(f"\n[indeed] Collecte terminée : {len(self.offers)} offres au total")
+        end = datetime.now()
+        self.stats["ended_at"] = end.isoformat()
+        self.stats["duration_seconds"] = round((end - start).total_seconds(), 2)
+        self.stats["offers_total"] = len(self.offers)
+
+        print(f"\n[indeed] Collecte terminée : {len(self.offers)} offres au total ({self.stats['duration_seconds']}s)")
         return self.offers
+
+    def save_stats(self, filename: str | None = None) -> Path:
+        """Sauvegarde les stats du run dans data/stats_YYYY-MM-DD_HHMMSS.json."""
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        if filename is None:
+            ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            filename = f"stats_{ts}.json"
+        path = OUTPUT_DIR / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.stats, f, ensure_ascii=False, indent=2)
+        print(f"[indeed] Stats sauvegardées → {path}")
+        return path
 
 
 # =============================================================================
@@ -426,6 +465,7 @@ async def main():
     await scraper.run()
     scraper.save_csv()
     scraper.save_json()
+    scraper.save_stats()
 
 
 if __name__ == "__main__":
