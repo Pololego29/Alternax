@@ -18,6 +18,7 @@ Utilisation rapide :
 import asyncio
 import csv
 import json
+import os
 import random
 import re
 from dataclasses import dataclass, asdict, fields, field
@@ -58,11 +59,32 @@ class JobOffer:
 # SECTION 2 – CONFIGURATION
 # =============================================================================
 
+def _env_str(key: str, default: str) -> str:
+    val = os.getenv(key)
+    return val if val else default
+
+
+def _env_int(key: str, default: int) -> int:
+    val = os.getenv(key)
+    try:
+        return int(val) if val else default
+    except ValueError:
+        return default
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
 BASE_URL  = "https://fr.indeed.com"
-QUERY     = "alternance"
-LOCATION  = "France"
-MAX_PAGES = 5           # Nombre de pages à scraper (≈ 15 offres/page)
-MAX_RETRY = 2           # Tentatives par page en cas d'échec
+QUERY     = _env_str("SCRAPER_QUERY", "alternance")
+LOCATION  = _env_str("SCRAPER_LOCATION", "France")
+MAX_PAGES = _env_int("SCRAPER_MAX_PAGES", 5)   # Nombre de pages à scraper (≈ 15 offres/page)
+MAX_RETRY = _env_int("SCRAPER_MAX_RETRY", 2)   # Tentatives par page en cas d'échec
+HEADLESS  = _env_bool("SCRAPER_HEADLESS", True)
 
 # Délais entre pages (en secondes) — plus longs = moins de détection bot
 DELAY_MIN = 5.0
