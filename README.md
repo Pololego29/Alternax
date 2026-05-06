@@ -1,10 +1,65 @@
 # Alternax — Agrégateur d'offres d'alternance
 
-Plateforme qui collecte automatiquement les offres d'alternance depuis Indeed, les déduplique et les expose sur un site web centralisé avec filtres et pagination.
+Alternax est un projet étudiant qui a pour but de centraliser des offres d'alternance sur une seule plateforme.
 
----
+L'idée est simple : récupérer automatiquement des offres depuis Indeed, les stocker dans une base de données, puis les afficher sur un petit site web avec une recherche, des filtres et une pagination.
 
-## Équipe
+## Objectif du projet
+
+Aujourd'hui, les offres d'alternance sont dispersées sur plusieurs sites.  
+Notre objectif est donc de créer un outil qui permet de gagner du temps dans la recherche d'alternance.
+
+Pour cette première version, nous nous concentrons sur :
+
+- la récupération automatique d'offres depuis Indeed ;
+- le stockage des offres dans une base locale ;
+- l'affichage des offres sur une interface web simple ;
+- la mise en place d'une API pour faire le lien entre la base et le site.
+
+## Fonctionnement général
+
+Le projet fonctionne en plusieurs étapes :
+
+1. Un scraper visite Indeed et récupère des offres d'alternance.
+2. Les offres sont nettoyées et dédupliquées pour éviter les doublons.
+3. Les offres sont stockées dans une base de données SQLite.
+4. Une API FastAPI permet de récupérer les offres.
+5. Le site web affiche les offres avec des filtres et une pagination.
+
+Schéma simplifié :
+
+```text
+Indeed
+  ↓
+Scraper Python
+  ↓
+Base de données SQLite
+  ↓
+API FastAPI
+  ↓
+Site web HTML/CSS/JS
+```
+
+## Lancer le projet en local
+
+```bash
+# Installer les dépendances
+pip install -r requirements-scraper.txt
+playwright install chromium
+
+# Lancer l'API et le site
+python run.py
+
+# Dans un second terminal, lancer le scraper
+python -m scrapers.run_scraper
+```
+
+Site → [http://localhost:8000](http://localhost:8000)
+
+<!--
+## VERSION COMPLÈTE (soutenance)
+
+### Équipe
 
 | Membre | Rôle |
 |---|---|
@@ -19,9 +74,7 @@ Tous les membres ont participé activement au projet. La répartition des commit
 
 ---
 
-## Comment ça marche
-
-Le projet suit un pipeline en 4 étapes :
+### Comment ça marche
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -59,7 +112,7 @@ Le projet suit un pipeline en 4 étapes :
 
 ---
 
-## Structure du projet
+### Structure du projet
 
 ```
 Alternax/
@@ -100,7 +153,7 @@ Alternax/
 
 ---
 
-## Stack technique
+### Stack technique
 
 | Couche | Technologie |
 |---|---|
@@ -115,54 +168,7 @@ Alternax/
 
 ---
 
-## Lancer le projet en local
-
-### 1. Prérequis
-
-- Python 3.11+
-- Node.js (pour le script de build Vercel, optionnel en local)
-
-### 2. Installation
-
-```bash
-# Créer l'environnement virtuel
-python -m venv .venv
-
-# Activer l'environnement
-source .venv/bin/activate        # macOS / Linux
-.venv\Scripts\activate           # Windows
-
-# Installer les dépendances
-pip install -r requirements-scraper.txt
-
-# Installer le navigateur Playwright
-playwright install chromium
-```
-
-### 3. Lancer l'API et le site
-
-```bash
-python run.py
-```
-
-- Site vitrine → [http://localhost:8000](http://localhost:8000)
-- Documentation API → [http://localhost:8000/docs](http://localhost:8000/docs)
-
-### 4. Lancer le scraper (remplit la base)
-
-Dans un second terminal :
-
-```bash
-python -m scrapers.run_scraper
-```
-
-Un navigateur Chrome s'ouvre, visite Indeed et collecte les offres (2–3 minutes). Une fois terminé, recharge le site — les offres apparaissent.
-
-> **Note :** le scraper ouvre un vrai navigateur visible en local (nécessaire pour éviter la détection d'Indeed). Sur GitHub Actions, il tourne en mode headless invisible.
-
----
-
-## Endpoints API
+### Endpoints API
 
 | Méthode | Route | Description |
 |---|---|---|
@@ -182,9 +188,7 @@ Un navigateur Chrome s'ouvre, visite Indeed et collecte les offres (2–3 minute
 
 ---
 
-## Déploiement (production)
-
-L'architecture cible pour un déploiement complet :
+### Déploiement (production)
 
 ```
 GitHub Actions (cron 6h)
@@ -197,7 +201,7 @@ Vercel
     └── Frontend statique → appelle l'API Railway
 ```
 
-### Variables d'environnement requises
+#### Variables d'environnement requises
 
 | Variable | Où | Valeur |
 |---|---|---|
@@ -205,7 +209,7 @@ Vercel
 | `API_URL` | Vercel | `https://votre-api.up.railway.app/api` |
 | `FRONTEND_URL` | Railway | `https://votre-app.vercel.app` |
 
-### Étapes
+#### Étapes
 
 1. Créer une base PostgreSQL sur [Supabase](https://supabase.com) (gratuit)
 2. Déployer l'API sur [Railway](https://railway.app) — connecter le repo GitHub, ajouter `DATABASE_URL`
@@ -215,7 +219,7 @@ Vercel
 
 ---
 
-## Améliorations futures
+### Améliorations futures
 
 - **Sources supplémentaires** — HelloWork, APEC, France Travail (API officielle gratuite)
 - **Recherche avancée** — filtres par secteur, niveau d'études, durée de contrat
@@ -225,7 +229,7 @@ Vercel
 
 ---
 
-## Stratégie anti-détection Indeed
+### Stratégie anti-détection Indeed
 
 Indeed détecte les bots et bloque les requêtes automatisées. Techniques mises en place :
 
@@ -237,3 +241,4 @@ Indeed détecte les bots et bloque les requêtes automatisées. Techniques mises
 - Scroll progressif simulant un comportement humain
 - Délais aléatoires entre les pages (5–9 secondes)
 - Retry automatique en cas de timeout (2 tentatives)
+-->
