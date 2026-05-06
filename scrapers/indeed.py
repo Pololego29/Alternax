@@ -49,6 +49,10 @@ class JobOffer:
     # Génération automatique de l'horodatage
     scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
+    def __post_init__(self):
+        if self.scraped_at is None:
+            self.scraped_at = datetime.now().isoformat()
+
 
 # =============================================================================
 # SECTION 2 – CONFIGURATION
@@ -201,6 +205,19 @@ class IndeedScraper:
         self.location  = location
         self.max_pages = max_pages
         self.offers: list[JobOffer] = []
+        self._seen_urls: set[str] = set()  # dédup intra-run
+
+    def _add_offers(self, new_offers: list[JobOffer]) -> int:
+        """Ajoute les offres en filtrant les doublons (même URL) déjà vus dans cette session."""
+        added = 0
+        for o in new_offers:
+            key = o.url or f"{o.title}|{o.company}|{o.location}"
+            if key in self._seen_urls:
+                continue
+            self._seen_urls.add(key)
+            self.offers.append(o)
+            added += 1
+        return added
 
     async def _warmup(self, page) -> None:
         """
@@ -315,8 +332,8 @@ class IndeedScraper:
 
             await human_scroll(page)
             page_offers = await extract_offers_from_page(page)
-            print(f"  → {len(page_offers)} offres trouvées")
-            self.offers.extend(page_offers)
+            added = self._add_offers(page_offers)
+            print(f"  → {len(page_offers)} offres trouvées ({added} nouvelles, {len(page_offers) - added} doublons)")
 
             # --- Pages 2+ : navigation via bouton Suivant ---
             for page_num in range(1, self.max_pages):
@@ -335,8 +352,8 @@ class IndeedScraper:
 
                 await human_scroll(page)
                 page_offers = await extract_offers_from_page(page)
-                print(f"  → {len(page_offers)} offres trouvées")
-                self.offers.extend(page_offers)
+                added = self._add_offers(page_offers)
+                print(f"  → {len(page_offers)} offres trouvées ({added} nouvelles, {len(page_offers) - added} doublons)")
 
             await browser.close()
 
