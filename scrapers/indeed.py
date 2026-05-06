@@ -49,10 +49,6 @@ class JobOffer:
     # Génération automatique de l'horodatage
     scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
-    def __post_init__(self):
-        if self.scraped_at is None:
-            self.scraped_at = datetime.now().isoformat()
-
 
 # =============================================================================
 # SECTION 2 – CONFIGURATION
