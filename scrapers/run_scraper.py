@@ -10,52 +10,43 @@ Nécessite DATABASE_URL en variable d'environnement pour écrire
 dans la base de production. En local sans DATABASE_URL, écrit dans SQLite.
 """
 
-import argparse
 import asyncio
-import logging
 import sys
 from pathlib import Path
-
-# Configuration du logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from database.db import init_db
 from pipeline.deduplicator import process_and_save
 from scrapers.indeed import IndeedScraper
+from scrapers.hellowork import HelloWorkScraper
 
 
-async def main(query: str = "alternance", location: str = "France", max_pages: int = 5) -> None:
-    try:
-        logger.info("Initialisation de la base de données...")
-        init_db()
+async def main() -> None:
+    print("[scraper] Initialisation de la base...")
+    init_db()
 
-        logger.info("Démarrage du scraping Indeed...")
-        scraper = IndeedScraper(query=query, location=location, max_pages=max_pages)
-        offers = await scraper.run()
+    all_offers = []
 
-        if not offers:
-            logger.warning("Aucune offre trouvée.")
-            return
+    # --- Indeed ---
+    print("\n[scraper] Démarrage du scraping Indeed...")
+    indeed_scraper = IndeedScraper(query="alternance", location="France", max_pages=5)
+    indeed_offers = await indeed_scraper.run()
+    all_offers.extend(indeed_offers)
+    print(f"[scraper] Indeed : {len(indeed_offers)} offres récupérées")
 
-        inserted = process_and_save(offers)
-        logger.info(f"Terminé : {inserted} nouvelles offres insérées sur {len(offers)} offres traitées.")
+    # --- HelloWork ---
+    print("\n[scraper] Démarrage du scraping HelloWork...")
+    hellowork_scraper = HelloWorkScraper(query="alternance", location="France", max_pages=5)
+    hellowork_offers = await hellowork_scraper.run()
+    all_offers.extend(hellowork_offers)
+    print(f"[scraper] HelloWork : {len(hellowork_offers)} offres récupérées")
 
-    except Exception as e:
-        logger.error(f"Erreur lors du scraping : {e}")
-        sys.exit(1)
+    # --- Déduplication & sauvegarde globale ---
+    print(f"\n[scraper] Total brut toutes sources : {len(all_offers)} offres")
+    inserted = process_and_save(all_offers)
+    print(f"[scraper] Terminé : {inserted} nouvelles offres insérées")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scraper d'offres d'alternance")
-    parser.add_argument("--query", default="alternance", help="Requête de recherche (défaut: alternance)")
-    parser.add_argument("--location", default="France", help="Localisation (défaut: France)")
-    parser.add_argument("--max-pages", type=int, default=5, help="Nombre maximum de pages (défaut: 5)")
-
-    args = parser.parse_args()
-    asyncio.run(main(query=args.query, location=args.location, max_pages=args.max_pages))
+    asyncio.run(main())
