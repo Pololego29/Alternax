@@ -47,7 +47,7 @@ async def main() -> None:
 
     print("[scraper] Démarrage de la source France Travail...")
     try:
-        ft = FranceTravailSource(query="alternance", max_results=150)
+        ft = FranceTravailSource(query="alternance", max_results=1000)
         all_offers.extend(await ft.run())
     except Exception as e:
         print(f"[scraper] ⚠️ Erreur France Travail : {e}")
