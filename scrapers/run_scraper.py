@@ -55,7 +55,7 @@ async def main() -> None:
 
     print("[scraper] Démarrage de la source L'Étudiant...")
     try:
-        letu = LEtudiantSource(max_pages=10, limit=50)
+        letu = LEtudiantSource(max_pages=20, limit=50)
         all_offers.extend(await letu.run())
     except Exception as e:
         print(f"[scraper] ⚠️ Erreur L'Étudiant : {e}")
