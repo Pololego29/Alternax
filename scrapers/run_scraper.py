@@ -30,6 +30,7 @@ from database.db import init_db
 from pipeline.deduplicator import process_and_save
 from scrapers.indeed import IndeedScraper
 from scrapers.france_travail import FranceTravailSource
+from scrapers.letudiant import LEtudiantSource
 
 
 async def main() -> None:
@@ -51,6 +52,13 @@ async def main() -> None:
         all_offers.extend(await ft.run())
     except Exception as e:
         print(f"[scraper] ⚠️ Erreur France Travail : {e}")
+
+    print("[scraper] Démarrage de la source L'Étudiant...")
+    try:
+        letu = LEtudiantSource(max_pages=10, limit=50)
+        all_offers.extend(await letu.run())
+    except Exception as e:
+        print(f"[scraper] ⚠️ Erreur L'Étudiant : {e}")
 
     inserted = process_and_save(all_offers)
     print(f"[scraper] Terminé : {inserted} nouvelles offres insérées")
