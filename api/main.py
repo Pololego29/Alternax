@@ -40,7 +40,7 @@ try:
     # Avant : from scrapers.indeed import main as run_indeed_scraper
     # Cette main() ne sauvegardait qu'en CSV/JSON, pas en base.
     # Maintenant on appelle scrapers/run_scraper.py qui exécute TOUTES les sources
-    # (Indeed + France Travail) PUIS persiste en base via process_and_save().
+    # (Indeed + France Travail + L'Étudiant) PUIS persiste en base via process_and_save().
     from scrapers.run_scraper import main as run_all_scrapers
     # --- FIN MODIFICATION ---
     logging.info("✅ Modules chargés.")
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     # --- MODIFICATION : on planifie maintenant l'orchestrateur multi-sources ---
     if run_all_scrapers:
         # On planifie pour que ça tourne régulièrement (ex: toutes les 30 min)
-        # → lance Indeed + France Travail + dédup + insert DB
+        # → lance Indeed + France Travail + L'Étudiant + dédup + insert DB
         scheduler.add_job(run_all_scrapers, 'interval', minutes=30, id='scrape_all_job')
         scheduler.start()
         
@@ -97,7 +97,7 @@ async def serve_home():
 @app.get("/api/sources")
 async def list_sources():
     """Retourne la liste des sources disponibles pour le frontend"""
-    return ["indeed", "france_travail"]
+    return ["indeed", "france_travail", "letudiant"]
 # ---------------------------------------------
 
 @app.get("/api/offres")
