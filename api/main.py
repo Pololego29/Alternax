@@ -12,13 +12,12 @@ from pathlib import Path
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# --- AJOUT : chargement des variables d'environnement depuis .env ---
+# --- Chargement des variables d'environnement depuis .env ---
 # Nécessaire pour que FT_CLIENT_ID et FT_CLIENT_SECRET soient disponibles
 # quand on lance l'API en local. En prod (GitHub Actions, Render…), les
 # variables sont déjà injectées par la plateforme, donc load_dotenv ne fera rien.
 from dotenv import load_dotenv
 load_dotenv()
-# --- FIN AJOUT ---
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,20 +34,14 @@ sys.path.insert(0, str(BASE_DIR))
 
 # Imports de tes modules
 try:
-    from database.db import init_db, get_offers, get_stats
-    # --- MODIFICATION : on importe désormais l'orchestrateur unifié ---
-    # Avant : from scrapers.indeed import main as run_indeed_scraper
-    # Cette main() ne sauvegardait qu'en CSV/JSON, pas en base.
-    # Maintenant on appelle scrapers/run_scraper.py qui exécute TOUTES les sources
-    # (Indeed + France Travail + L'Étudiant) PUIS persiste en base via process_and_save().
+    from database.db import init_db, get_offers, get_stats, get_dashboard_stats
+    # On importe l'orchestrateur unifié qui exécute TOUTES les sources
+    # (Indeed + France Travail + L'Étudiant) PUIS persiste en base.
     from scrapers.run_scraper import main as run_all_scrapers
-    # --- FIN MODIFICATION ---
     logging.info("✅ Modules chargés.")
 except ImportError as e:
     logging.error(f"⚠️ Erreur import : {e}")
-    # --- MODIFICATION : fallback renommé pour correspondre au nouvel import ---
     run_all_scrapers = None
-    # --- FIN MODIFICATION ---
 
 # =============================================================================
 # 3. CYCLE DE VIE (LIFESPAN)
@@ -59,18 +52,16 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     print("🚀 [Alternax] Démarrage et mise à jour des données...")
     init_db()
-    
-    # --- MODIFICATION : on planifie maintenant l'orchestrateur multi-sources ---
+
     if run_all_scrapers:
-        # On planifie pour que ça tourne régulièrement (ex: toutes les 30 min)
+        # On planifie pour que ça tourne régulièrement (toutes les 30 min)
         # → lance Indeed + France Travail + L'Étudiant + dédup + insert DB
         scheduler.add_job(run_all_scrapers, 'interval', minutes=30, id='scrape_all_job')
         scheduler.start()
-        
-        # ACTUALISATION IMMÉDIATE : On lance le scrap tout de suite au démarrage
+
+        # ACTUALISATION IMMÉDIATE : on lance le scrap tout de suite au démarrage
         asyncio.create_task(run_all_scrapers())
-    # --- FIN MODIFICATION ---
-    
+
     yield
     scheduler.shutdown()
 
@@ -93,21 +84,58 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 async def serve_home():
     return FileResponse(str(FRONTEND_DIR / "index.html"))
 
-# --- NOUVELLE ROUTE POUR LE MENU DÉROULANT ---
+
 @app.get("/api/sources")
 async def list_sources():
     """Retourne la liste des sources disponibles pour le frontend"""
     return ["indeed", "france_travail", "letudiant"]
-# ---------------------------------------------
+
 
 @app.get("/api/offres")
 async def list_offres(
-    search: str = "", location: str = "", source: str = "", 
-    page: int = 1, per_page: int = 20
+    search: str = "",
+    location: str = "",
+    source: str = "",
+    tech: str = "",
+    page: int = 1,
+    per_page: int = 20,
 ):
-    offers, total = get_offers(search=search, location=location, source=source, page=page, per_page=per_page)
-    return {"offers": offers, "total": total, "page": page, "pages": max(1, -(-total // per_page))}
+    """
+    Liste paginée des offres avec filtres optionnels.
+
+    Paramètres :
+    - search   : recherche fulltext dans titre, entreprise, description
+    - location : filtre par ville/région (partial match)
+    - source   : filtre par source (indeed, france_travail, letudiant)
+    - tech     : filtre par tag technique (ex: "Python", "React")
+    - page     : numéro de page (défaut 1)
+    - per_page : nombre d'offres par page (défaut 20)
+    """
+    offers, total = get_offers(
+        search=search, location=location, source=source, tech=tech,
+        page=page, per_page=per_page,
+    )
+    return {
+        "offers": offers,
+        "total":  total,
+        "page":   page,
+        "pages":  max(1, -(-total // per_page)),
+    }
+
 
 @app.get("/api/stats")
 async def api_stats():
+    """Stats globales : total, répartition par source, dernière collecte."""
     return get_stats()
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(limit: int = 5):
+    """
+    Stats agrégées pour le dashboard frontend :
+    - top entreprises qui recrutent
+    - top localisations
+    - top technologies demandées
+    - répartition par source
+    """
+    return get_dashboard_stats(limit=limit)
