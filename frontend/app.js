@@ -1,11 +1,12 @@
 /**
  * app.js
- * Gère l'affichage des offres, les filtres, la pagination
- * et la communication avec l'API FastAPI.
+ * Gère l'affichage des offres, les filtres, la pagination,
+ * le mini-dashboard et la communication avec l'API FastAPI.
  */
 
 const API = typeof API_URL !== "undefined" ? API_URL : "http://localhost:8000/api";
-let currentPage = 1;
+let currentPage  = 1;
+let currentTech  = "";          // tag tech actif (ex: "Python")
 let debounceTimer = null;
 
 // =============================================================================
@@ -15,11 +16,12 @@ let debounceTimer = null;
 document.addEventListener("DOMContentLoaded", () => {
   loadStats();
   loadSources();
+  loadDashboard();
   loadOffers(1);
 });
 
 // =============================================================================
-// STATS
+// STATS (barre du haut)
 // =============================================================================
 
 async function loadStats() {
@@ -33,7 +35,7 @@ async function loadStats() {
   sourcesEl.innerHTML = Object.entries(data.by_source)
     .map(([src, count]) => `
       <div>
-        <span class="opacity-70 capitalize">${src}</span>
+        <span class="opacity-75 capitalize">${src.replace("_", " ")}</span>
         <span class="ml-1 font-semibold">${count.toLocaleString("fr-FR")}</span>
       </div>
     `).join("");
@@ -52,6 +54,42 @@ async function loadStats() {
 }
 
 // =============================================================================
+// DASHBOARD (top entreprises, lieux, technos, sources)
+// =============================================================================
+
+async function loadDashboard() {
+  const data = await fetchJson(`${API}/dashboard?limit=5`);
+  if (!data) return;
+
+  renderDashList("dash-companies", data.top_companies);
+  renderDashList("dash-locations", data.top_locations);
+  renderDashList("dash-techs",     data.top_techs,    true);  // clickable
+  renderDashList("dash-sources",   data.by_source);
+}
+
+function renderDashList(elementId, items, clickable = false) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  if (!items || items.length === 0) {
+    el.innerHTML = `<li class="text-xs text-gray-400 italic">Aucune donnée</li>`;
+    return;
+  }
+  const max = Math.max(...items.map(i => i.count));
+
+  el.innerHTML = items.map(item => {
+    const width = max > 0 ? (item.count / max) * 100 : 0;
+    const onclick = clickable ? `onclick="filterByTech('${escapeAttr(item.name)}')"` : "";
+    const cls     = clickable ? "dash-item-clickable" : "";
+    return `
+      <li class="dash-item ${cls}" style="--bar-width: ${width}%" ${onclick}>
+        <span class="dash-name">${escapeHtml(item.name)}</span>
+        <span class="dash-count">${item.count.toLocaleString("fr-FR")}</span>
+      </li>
+    `;
+  }).join("");
+}
+
+// =============================================================================
 // SOURCES (pour le select)
 // =============================================================================
 
@@ -60,10 +98,13 @@ async function loadSources() {
   if (!sources) return;
 
   const select = document.getElementById("source");
+  // On nettoie sauf l'option par défaut
+  while (select.options.length > 1) select.remove(1);
+
   sources.forEach(src => {
     const opt = document.createElement("option");
     opt.value = src;
-    opt.textContent = src.charAt(0).toUpperCase() + src.slice(1);
+    opt.textContent = src.charAt(0).toUpperCase() + src.slice(1).replace("_", " ");
     select.appendChild(opt);
   });
 }
@@ -81,9 +122,10 @@ async function loadOffers(page = 1) {
   const source   = document.getElementById("source").value;
 
   const params = new URLSearchParams({ page, per_page: 20 });
-  if (search)   params.set("search", search);
-  if (location) params.set("location", location);
-  if (source)   params.set("source", source);
+  if (search)      params.set("search",   search);
+  if (location)    params.set("location", location);
+  if (source)      params.set("source",   source);
+  if (currentTech) params.set("tech",     currentTech);
 
   const data = await fetchJson(`${API}/offres?${params}`);
   showLoading(false);
@@ -113,7 +155,7 @@ async function loadOffers(page = 1) {
 
 function renderCard(offer) {
   const salary = offer.salary
-    ? `<span>💰 ${offer.salary}</span>`
+    ? `<span>💰 ${escapeHtml(offer.salary)}</span>`
     : "";
 
   const date = offer.scraped_at
@@ -122,6 +164,18 @@ function renderCard(offer) {
 
   const desc = offer.description
     ? `<p class="offer-description">${escapeHtml(offer.description)}</p>`
+    : "";
+
+  // Tags techniques (clickables pour filtrer)
+  const tags = Array.isArray(offer.tech_tags) && offer.tech_tags.length > 0
+    ? `<div class="offer-tags">
+         ${offer.tech_tags.map(tag => `
+           <button class="tech-tag ${tag === currentTech ? "active" : ""}"
+                   onclick="event.stopPropagation(); filterByTech('${escapeAttr(tag)}')">
+             ${escapeHtml(tag)}
+           </button>
+         `).join("")}
+       </div>`
     : "";
 
   return `
@@ -136,14 +190,46 @@ function renderCard(offer) {
         ${date}
       </div>
       ${desc}
+      ${tags}
       <div class="offer-footer">
-        <span class="source-badge">${offer.source}</span>
+        <span class="source-badge">${escapeHtml(offer.source)}</span>
         ${offer.url
-          ? `<a href="${offer.url}" target="_blank" rel="noopener" class="offer-link">Voir l'offre →</a>`
+          ? `<a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener" class="offer-link">Voir l'offre →</a>`
           : ""}
       </div>
     </div>
   `;
+}
+
+// =============================================================================
+// FILTRE PAR TAG TECHNIQUE
+// =============================================================================
+
+function filterByTech(tag) {
+  // Toggle : si on clique sur le tag déjà actif, on le désactive
+  currentTech = (currentTech === tag) ? "" : tag;
+  renderTechFilterChip();
+  loadOffers(1);
+  window.scrollTo({ top: document.getElementById("offers-grid").offsetTop - 100, behavior: "smooth" });
+}
+
+function clearTechFilter() {
+  currentTech = "";
+  renderTechFilterChip();
+  loadOffers(1);
+}
+
+function renderTechFilterChip() {
+  const wrapper = document.getElementById("active-filters");
+  const label   = document.getElementById("tech-filter-label");
+  if (currentTech) {
+    label.textContent = currentTech;
+    wrapper.classList.remove("hidden");
+    wrapper.classList.add("flex");
+  } else {
+    wrapper.classList.add("hidden");
+    wrapper.classList.remove("flex");
+  }
 }
 
 // =============================================================================
@@ -156,12 +242,10 @@ function renderPagination(page, totalPages) {
 
   const buttons = [];
 
-  // Précédent
   if (page > 1) {
     buttons.push(btn("←", page - 1));
   }
 
-  // Pages autour de la page courante
   const range = pagesRange(page, totalPages);
   range.forEach(p => {
     if (p === "...") {
@@ -171,7 +255,6 @@ function renderPagination(page, totalPages) {
     }
   });
 
-  // Suivant
   if (page < totalPages) {
     buttons.push(btn("→", page + 1));
   }
@@ -200,15 +283,18 @@ function debouncedSearch() {
 }
 
 function resetFilters() {
-  document.getElementById("search").value = "";
+  document.getElementById("search").value   = "";
   document.getElementById("location").value = "";
-  document.getElementById("source").value = "";
+  document.getElementById("source").value   = "";
+  currentTech = "";
+  renderTechFilterChip();
   loadOffers(1);
 }
 
 function refresh() {
   loadStats();
   loadSources();
+  loadDashboard();
   loadOffers(currentPage);
   showToast("Données actualisées");
 }
@@ -240,10 +326,16 @@ function formatDate(iso) {
 }
 
 function escapeHtml(str) {
-  return String(str)
+  return String(str ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function escapeAttr(str) {
+  return String(str ?? "")
+    .replace(/'/g, "\\'")
     .replace(/"/g, "&quot;");
 }
 
