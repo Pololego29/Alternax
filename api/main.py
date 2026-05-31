@@ -88,7 +88,7 @@ async def serve_home():
 @app.get("/api/sources")
 async def list_sources():
     """Retourne la liste des sources disponibles pour le frontend"""
-    return ["indeed", "france_travail", "letudiant"]
+    return ["indeed", "france_travail", "letudiant", "hellowork"]
 
 
 @app.get("/api/offres")
