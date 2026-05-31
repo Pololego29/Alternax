@@ -31,6 +31,7 @@ from pipeline.deduplicator import process_and_save
 from scrapers.indeed import IndeedScraper
 from scrapers.france_travail import FranceTravailSource
 from scrapers.letudiant import LEtudiantSource
+from scrapers.hellowork import fetch_hellowork
 
 
 async def main() -> None:
@@ -62,6 +63,13 @@ async def main() -> None:
     except Exception as e:
         print(f"[scraper] ⚠️ Erreur L'Étudiant : {e}")
     print(f"[scraper] Total accumulé après L'Étudiant : {len(all_offers)} offres")
+
+    print("[scraper] Démarrage de la source HelloWork...")
+    try:
+        all_offers.extend(await fetch_hellowork())
+    except Exception as e:
+        print(f"[scraper] ⚠️ Erreur HelloWork : {e}")
+    print(f"[scraper] Total accumulé après HelloWork : {len(all_offers)} offres")
 
     inserted = process_and_save(all_offers)
     print(f"[scraper] Terminé : {inserted} nouvelles offres insérées")
