@@ -19,7 +19,7 @@ Plateforme qui collecte automatiquement les offres d'alternance depuis quatre so
 Alternax agrège les offres d'alternance depuis quatre sources complémentaires :
 
 ### Indeed
-Scraping HTML via Playwright avec gestion de la protection Cloudflare et du mur de connexion. Utilise `playwright-stealth` pour contourner la détection anti-bot. Module : `scrapers/indeed.py`.
+Scraping HTML via Playwright avec gestion de la protection Cloudflare et du mur de connexion. Utilise `playwright-stealth` pour contourner la détection anti-bot. Stratégie **multi-requêtes** : plutôt qu'une seule recherche `alternance France` (qui retournerait toujours les mêmes ~16 résultats sponsorisés), on lance **11 requêtes ciblées** (par métier + par ville) dans la même session Chromium, ce qui porte le volume à ~80-130 offres uniques par run. Module : `scrapers/indeed.py`.
 
 ### France Travail
 Connexion à l'API officielle France Travail (ex-Pôle Emploi) via OAuth2 (flow `client_credentials`). Récupère jusqu'à 1000 offres par run via pagination, filtrées sur les contrats d'alternance (apprentissage + professionnalisation). Les offres sont enrichies avec les grands domaines ROME pour la classification métier. Module : `scrapers/france_travail.py`.
@@ -61,7 +61,7 @@ Alternax/
 │   └── workflows/
 │       └── scrape.yml            # Cron GitHub Actions (toutes les 3h)
 ├── scrapers/
-│   ├── indeed.py                 # Scraper Indeed (Playwright + stealth)
+│   ├── indeed.py                 # Scraper Indeed (Playwright + stealth + multi-requêtes)
 │   ├── france_travail.py         # Source France Travail (OAuth2 + REST)
 │   ├── letudiant.py              # Source L'Étudiant (tRPC public)
 │   ├── hellowork.py              # Scraper HelloWork (httpx + BeautifulSoup)
@@ -227,12 +227,14 @@ Contrairement à France Travail, L'Étudiant et HelloWork qui exposent des conte
 - **Mode visible** (`headless=False`) — Cloudflare détecte trop facilement le mode headless
 - **Gestion de la protection Cloudflare** — attente automatique du challenge "Un instant…"
 - **Rotation des User-Agents** — pool de UA Chrome/Firefox réalistes
-- **Warm-up** — visite de la page d'accueil avant la recherche
-- **Navigation via le bouton "Suivant"** — clics réels, pas d'URLs directes
-- **Scroll humain progressif** — défilement aléatoire par paliers
-- **Délais aléatoires** entre pages (5–9 secondes)
-- **Retry automatique** en cas de timeout
-- **Limite assumée à la page 1** — Indeed force la connexion à partir de la page 2 (paramètre `branding=page-two-signin`), on accepte cette limite plutôt que la contourner
+- **Warm-up** — visite de la page d'accueil avant les recherches
+- **Stratégie multi-requêtes** — Indeed force la connexion à partir de la page 2 (paramètre `branding=page-two-signin`), on compense en lançant **11 requêtes ciblées différentes** (par métier + par ville) dans la même session Chromium, ce qui porte le volume de ~16 à **~80-130 offres uniques par run**
+- **Filtre `fromage=3`** — limite aux offres postées dans les 3 derniers jours pour garantir la fraîcheur des résultats à chaque run
+- **Cascade de sélecteurs CSS** — l'extracteur essaie 8 variantes de sélecteurs pour le titre, 4 pour l'entreprise, 3 pour le lieu : résistant aux changements réguliers du HTML d'Indeed
+- **Scroll humain progressif** — défilement aléatoire par paliers entre les requêtes
+- **Délais aléatoires** entre requêtes (4–7 secondes)
+- **Retry automatique** en cas de timeout ou de Cloudflare non résolu (max 2 tentatives par requête)
+- **Diagnostic intégré** — si une page renvoie des cards mais aucune extraction réussie, dump automatique du HTML de la première card dans la console pour identifier rapidement un éventuel changement de structure
 
 ## Roadmap
 
@@ -242,10 +244,11 @@ Contrairement à France Travail, L'Étudiant et HelloWork qui exposent des conte
 - [x] **Phase 4** — Intégration HelloWork (httpx + BeautifulSoup multi-catégories)
 - [x] **Phase 5** — Enrichissement par tags techniques + dashboard analytique
 - [x] **Phase 6** — Tests unitaires (pytest)
-- [ ] **Phase 7** — Scrapers APEC, LinkedIn, Welcome to the Jungle
-- [ ] **Phase 8** — NLP : extraction d'entités structurées (niveau d'études, durée contrat, soft skills) via spaCy / BERT
-- [ ] **Phase 9** — Recommandation personnalisée par profil utilisateur (matching par compétences)
-- [ ] **Phase 10** — Production : PostgreSQL hébergé · Docker · déploiement VPS · domaine personnalisé
+- [x] **Phase 7** — Optimisation Indeed multi-requêtes + extracteur résistant
+- [ ] **Phase 8** — Scrapers APEC, LinkedIn, Welcome to the Jungle
+- [ ] **Phase 9** — NLP : extraction d'entités structurées (niveau d'études, durée contrat, soft skills) via spaCy / BERT
+- [ ] **Phase 10** — Recommandation personnalisée par profil utilisateur (matching par compétences)
+- [ ] **Phase 11** — Production : PostgreSQL hébergé · Docker · déploiement VPS · domaine personnalisé
 
 ## Dépendances principales
 fastapi>=0.111           # Framework API REST asynchrone
