@@ -2,12 +2,16 @@ name: Scraping Indeed
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # toutes les 6h
+    - cron: '0 */3 * * *'   # toutes les 3h (8 runs/jour)
   workflow_dispatch:          # déclenchement manuel depuis l'onglet Actions
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: scrape
+      cancel-in-progress: false
 
     steps:
       - name: Checkout du code
@@ -27,5 +31,4 @@ jobs:
       - name: Lancer le scraper
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          SCRAPER_HEADLESS: "true"
         run: python -m scrapers.run_scraper

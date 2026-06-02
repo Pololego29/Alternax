@@ -1,96 +1,78 @@
 """
 scrapers/run_scraper.py
 =======================
-Point d'entrée standalone pour le scraping multi-sources.
+Point d'entrée standalone pour le scraping de toutes les sources.
 
-Utilisé par GitHub Actions (voir .github/workflows/scrape.yml).
-Peut aussi être lancé manuellement : python -m scrapers.run_scraper
+Utilisé par GitHub Actions (voir .github/workflows/scrape.yml) et l'API
+FastAPI (api/main.py). Peut aussi être lancé manuellement :
+    python -m scrapers.run_scraper
 
-Variables d'environnement :
-    DATABASE_URL          : URL PostgreSQL (SQLite local si absent)
-    SCRAPER_SOURCES       : Sources activées, séparées par virgule (défaut : indeed,hellowork)
-    SCRAPER_EXPORT_FORMATS: Formats d'export optionnels (ex: csv,json)
-    SCRAPER_LOG_FILE      : 1/true pour activer les logs fichiers
+Nécessite DATABASE_URL en variable d'environnement pour écrire
+dans la base de production. En local sans DATABASE_URL, écrit dans SQLite.
+Pour France Travail : nécessite FT_CLIENT_ID et FT_CLIENT_SECRET.
 """
 
 import asyncio
-import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 1. On définit la racine du projet (le dossier parent de scrapers/)
+RACINE_PROJET = Path(__file__).parent.parent
+
+# 2. On charge explicitement le .env qui se trouve à cette racine
+load_dotenv(dotenv_path=RACINE_PROJET / '.env')
+
+# 3. On ajoute la racine au PYTHONPATH pour les imports
+sys.path.insert(0, str(RACINE_PROJET))
 
 from database.db import init_db
 from pipeline.deduplicator import process_and_save
 from scrapers.indeed import IndeedScraper
-from scrapers.hellowork import HelloWorkScraper
-from utils.logger import get_logger, log_session_summary
-from utils.exporters import auto_export
-from utils.validators import validate_and_normalize
-
-
-log = get_logger("run_scraper")
-
-# Sources disponibles : nom → classe scraper
-_SCRAPERS = {
-    "indeed":    IndeedScraper,
-    "hellowork": HelloWorkScraper,
-}
-
-def _get_active_sources() -> list[str]:
-    """Lit SCRAPER_SOURCES et retourne les sources activées."""
-    env = os.getenv("SCRAPER_SOURCES", "indeed,hellowork")
-    sources = [s.strip().lower() for s in env.split(",") if s.strip()]
-    unknown = [s for s in sources if s not in _SCRAPERS]
-    if unknown:
-        log.warning(f"Sources inconnues ignorées : {unknown}")
-    return [s for s in sources if s in _SCRAPERS]
-
-
-async def run_scraper(name: str, scraper_cls) -> list:
-    """Lance un scraper individuel et retourne ses offres normalisées."""
-    log.info(f"Démarrage : {name}")
-    try:
-        scraper = scraper_cls()
-        offers  = await scraper.run()
-        clean   = validate_and_normalize(offers)
-        log_session_summary(log, scraper.stats)
-        return clean
-    except Exception as e:
-        log.error(f"Erreur fatale dans {name} : {e}", exc_info=True)
-        return []
+from scrapers.france_travail import FranceTravailSource
+from scrapers.letudiant import LEtudiantSource
+from scrapers.hellowork import fetch_hellowork
 
 
 async def main() -> None:
-    log.info("=== Alternax Scraper démarrage ===")
-    log.info("Initialisation de la base de données...")
+    print("[scraper] Initialisation de la base...")
     init_db()
 
-    sources = _get_active_sources()
-    if not sources:
-        log.error("Aucune source active — vérifiez SCRAPER_SOURCES")
-        return
-
-    log.info(f"Sources actives : {', '.join(sources)}")
-
-    # Lancement séquentiel (évite la surcharge réseau et les bans)
     all_offers = []
-    for source_name in sources:
-        offers = await run_scraper(source_name, _SCRAPERS[source_name])
-        all_offers.extend(offers)
 
-    log.info(f"Total toutes sources : {len(all_offers)} offres normalisées")
+    print("[scraper] Démarrage du scraping Indeed...")
+    try:
+        indeed = IndeedScraper(query="alternance", location="France", max_pages=5)
+        all_offers.extend(await indeed.run())
+    except Exception as e:
+        print(f"[scraper] Erreur Indeed : {e}")
+    print(f"[scraper] Total accumulé après Indeed : {len(all_offers)} offres")
 
-    # Insertion en base
+    print("[scraper] Démarrage de la source France Travail...")
+    try:
+        ft = FranceTravailSource(query="alternance", max_results=1000)
+        all_offers.extend(await ft.run())
+    except Exception as e:
+        print(f"[scraper] Erreur France Travail : {e}")
+    print(f"[scraper] Total accumulé après France Travail : {len(all_offers)} offres")
+
+    print("[scraper] Démarrage de la source L'Étudiant...")
+    try:
+        letu = LEtudiantSource(max_pages=20, limit=50)
+        all_offers.extend(await letu.run())
+    except Exception as e:
+        print(f"[scraper] Erreur L'Étudiant : {e}")
+    print(f"[scraper] Total accumulé après L'Étudiant : {len(all_offers)} offres")
+
+    print("[scraper] Démarrage de la source HelloWork...")
+    try:
+        all_offers.extend(await fetch_hellowork())
+    except Exception as e:
+        print(f"[scraper] Erreur HelloWork : {e}")
+    print(f"[scraper] Total accumulé après HelloWork : {len(all_offers)} offres")
+
     inserted = process_and_save(all_offers)
-    log.info(f"Insertion terminée : {inserted} nouvelles offres en base")
-
-    # Export optionnel selon SCRAPER_EXPORT_FORMATS
-    exported = auto_export(all_offers)
-    if exported:
-        log.info(f"Exports créés : {exported}")
-
-    log.info("=== Alternax Scraper terminé ===")
+    print(f"[scraper] Terminé : {inserted} nouvelles offres insérées")
 
 
 if __name__ == "__main__":

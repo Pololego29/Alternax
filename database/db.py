@@ -11,10 +11,14 @@ En local : laisser DATABASE_URL vide → SQLite dans data/offers.db
 En prod  : définir DATABASE_URL=postgresql://user:pass@host/db
 """
 
+import json
 import os
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
+
+from pipeline.enrichment import extract_tech_tags
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_PATH      = Path(__file__).parent.parent / "data" / "offers.db"
@@ -95,12 +99,20 @@ def init_db() -> None:
                 url           TEXT      UNIQUE,
                 source        TEXT      DEFAULT '',
                 scraped_at    TEXT      DEFAULT '',
+                tech_tags     TEXT      DEFAULT '[]',
                 created_at    {_SCHEMA_TS}
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_source   ON offers(source)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_location ON offers(location)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_created  ON offers(created_at)")
+
+        # Migration douce : ajoute la colonne tech_tags si elle n'existe pas
+        # (utile si la table était déjà créée avant cette modification)
+        try:
+            conn.execute("ALTER TABLE offers ADD COLUMN tech_tags TEXT DEFAULT '[]'")
+        except Exception:
+            pass  # colonne déjà existante, on ignore
 
 
 # =============================================================================
@@ -110,17 +122,27 @@ def init_db() -> None:
 # INSERT OR IGNORE (SQLite) vs ON CONFLICT DO NOTHING (PostgreSQL)
 _INSERT_SQL = (
     """INSERT INTO offers
-           (title, company, location, contract_type, salary, description, url, source, scraped_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (title, company, location, contract_type, salary, description, url, source, scraped_at, tech_tags)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (url) DO NOTHING"""
     if _USE_PG else
     """INSERT OR IGNORE INTO offers
-           (title, company, location, contract_type, salary, description, url, source, scraped_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+           (title, company, location, contract_type, salary, description, url, source, scraped_at, tech_tags)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 )
 
 
 def _params(offer: dict) -> list:
+    """Convertit une offre dict en liste de paramètres SQL, avec extraction
+    automatique des tags techniques si non fournis."""
+    tags = offer.get("tech_tags")
+    if tags is None or tags == []:
+        tags = extract_tech_tags(
+            offer.get("title", ""),
+            offer.get("description", ""),
+        )
+    tags_json = json.dumps(tags) if isinstance(tags, list) else (tags or "[]")
+
     return [
         offer.get("title", ""),
         offer.get("company", ""),
@@ -131,14 +153,8 @@ def _params(offer: dict) -> list:
         offer.get("url", ""),
         offer.get("source", ""),
         offer.get("scraped_at", ""),
+        tags_json,
     ]
-
-
-def insert_offer(offer: dict) -> bool:
-    """Insère une offre. Retourne True si insérée, False si déjà existante."""
-    with get_conn() as conn:
-        cur = conn.execute(_INSERT_SQL, _params(offer))
-        return cur.rowcount > 0
 
 
 def insert_offers_bulk(offers: list[dict]) -> int:
@@ -158,10 +174,21 @@ def insert_offers_bulk(offers: list[dict]) -> int:
 _LIKE = "ILIKE" if _USE_PG else "LIKE"  # ILIKE = insensible à la casse en PostgreSQL
 
 
+def _parse_tags(row_dict: dict) -> dict:
+    """Désérialise tech_tags depuis JSON pour le frontend."""
+    raw = row_dict.get("tech_tags") or "[]"
+    try:
+        row_dict["tech_tags"] = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        row_dict["tech_tags"] = []
+    return row_dict
+
+
 def get_offers(
     search: str = "",
     location: str = "",
     source: str = "",
+    tech: str = "",
     page: int = 1,
     per_page: int = 20,
 ) -> tuple[list[dict], int]:
@@ -184,6 +211,12 @@ def get_offers(
         conditions.append("source = ?")
         params.append(source)
 
+    if tech:
+        # Recherche le tag dans le JSON sérialisé : ex. cherche "\"Python\""
+        # entre guillemets pour éviter les sous-chaînes accidentelles.
+        conditions.append(f"tech_tags {_LIKE} ?")
+        params.append(f'%"{tech}"%')
+
     where  = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = (page - 1) * per_page
 
@@ -195,7 +228,8 @@ def get_offers(
         rows = conn.execute(
             f"""
             SELECT id, title, company, location, contract_type,
-                   salary, description, url, source, scraped_at, created_at
+                   salary, description, url, source, scraped_at,
+                   tech_tags, created_at
             FROM offers {where}
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -203,7 +237,7 @@ def get_offers(
             params + [per_page, offset],
         ).fetchall()
 
-    return [dict(r) for r in rows], total
+    return [_parse_tags(dict(r)) for r in rows], total
 
 
 def get_stats() -> dict:
@@ -225,6 +259,66 @@ def get_stats() -> dict:
         "total": total,
         "by_source": {row["source"]: row["count"] for row in by_source},
         "last_scrape": last_scrape or "Jamais",
+    }
+
+
+def get_dashboard_stats(limit: int = 5) -> dict:
+    """
+    Stats pour le mini-dashboard frontend :
+    - Top entreprises qui recrutent
+    - Top localisations
+    - Top technologies recherchées (extraite des tech_tags)
+    - Répartition par source
+    """
+    with get_conn() as conn:
+        # Top entreprises (on filtre les vides)
+        top_companies = conn.execute(
+            f"""
+            SELECT company, COUNT(*) AS count
+            FROM offers
+            WHERE company != '' AND company IS NOT NULL
+            GROUP BY company
+            ORDER BY count DESC
+            LIMIT ?
+            """, [limit]
+        ).fetchall()
+
+        # Top localisations
+        top_locations = conn.execute(
+            f"""
+            SELECT location, COUNT(*) AS count
+            FROM offers
+            WHERE location != '' AND location IS NOT NULL
+            GROUP BY location
+            ORDER BY count DESC
+            LIMIT ?
+            """, [limit]
+        ).fetchall()
+
+        # Répartition par source
+        by_source = conn.execute(
+            "SELECT source, COUNT(*) AS count FROM offers GROUP BY source ORDER BY count DESC"
+        ).fetchall()
+
+        # Top techs : on agrège les listes JSON côté Python (compatible SQLite + PG)
+        all_tags = conn.execute(
+            "SELECT tech_tags FROM offers WHERE tech_tags != '[]' AND tech_tags IS NOT NULL"
+        ).fetchall()
+
+    # Agrégation des tags
+    tag_counter: Counter = Counter()
+    for row in all_tags:
+        try:
+            tags = json.loads(row["tech_tags"])
+            tag_counter.update(tags)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return {
+        "top_companies": [{"name": r["company"],  "count": r["count"]} for r in top_companies],
+        "top_locations": [{"name": r["location"], "count": r["count"]} for r in top_locations],
+        "top_techs":     [{"name": name, "count": n} for name, n in tag_counter.most_common(limit)],
+        "by_source":     [{"name": r["source"],   "count": r["count"]} for r in by_source],
     }
 
 

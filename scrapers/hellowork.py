@@ -1,314 +1,308 @@
+
 """
 scrapers/hellowork.py
-=====================
-Scraper HelloWork France pour les offres d'alternance.
+======================
+Scraper pour les offres d'alternance sur hellowork.com.
 
-HelloWork charge ses offres côté serveur (HTML statique),
-ce qui permet d'utiliser des requêtes HTTP simples via httpx
-plutôt que Playwright — plus rapide et moins détectable.
+Stratégie : HelloWork sert son HTML rendu côté serveur, donc on peut utiliser
+httpx + BeautifulSoup (beaucoup plus rapide que Playwright). La pagination
+classique (?p=N) ne fonctionne pas, mais en combinant ~35 URLs de catégories
+différentes (domaines + villes + métiers), on récupère ~500-700 offres uniques
+en une seule passe.
 
-Lancer via : python -m scrapers.run_scraper
-
-Variables d'environnement :
-    SCRAPER_QUERY       : Requête de recherche (défaut : "alternance")
-    SCRAPER_LOCATION    : Localisation (défaut : "france")
-    SCRAPER_MAX_PAGES   : Nombre de pages (défaut : 5)
-    HW_DELAY_MIN        : Délai minimum entre pages en secondes (défaut : 3.0)
-    HW_DELAY_MAX        : Délai maximum entre pages en secondes (défaut : 6.0)
+Couverture : tous les profils étudiants (tech, commerce, RH, santé, BTP,
+droit, marketing, hôtellerie, finance...) et toutes les grandes villes de France.
 """
 
 import asyncio
-import os
-import random
 import re
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import urlencode, quote_plus
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 
 # =============================================================================
-# SECTION 1 – MODÈLE DE DONNÉES
+# DATA MODEL
 # =============================================================================
 
 @dataclass
 class JobOffer:
-    """Représente une offre d'alternance normalisée (compatible IndeedScraper)."""
-    title:         str
-    company:       str
-    location:      str
-    contract_type: str
-    salary:        str
-    description:   str
-    url:           str
-    source:        str
-    scraped_at:    str = field(default_factory=lambda: datetime.now().isoformat())
+    title:         str  = ""
+    company:       str  = ""
+    location:      str  = ""
+    contract_type: str  = "Alternance"
+    salary:        str  = ""
+    description:   str  = ""
+    url:           str  = ""
+    source:        str  = "hellowork"
+    scraped_at:    str  = ""
+    tech_tags:     list = field(default_factory=list)
 
 
 # =============================================================================
-# SECTION 2 – CONFIGURATION
+# CONFIGURATION
 # =============================================================================
 
-def _env_str(key: str, default: str) -> str:
-    val = os.getenv(key)
-    return val if val else default
+BASE_URL = "https://www.hellowork.com"
 
+# Liste des catégories explorées en page 1.
+# Couvre tous les profils étudiants pour ne pas biaiser le dataset vers la tech.
+DEFAULT_CATEGORY_URLS = [
+    # ───────── Domaines (tous les grands secteurs) ─────────
+    "/fr-fr/alternance/domaine_informatique.html",
+    "/fr-fr/alternance/domaine_commerce.html",
+    "/fr-fr/alternance/domaine_marketing-communication.html",
+    "/fr-fr/alternance/domaine_compta-gestion-finance.html",
+    "/fr-fr/alternance/domaine_ressources-humaines.html",
+    "/fr-fr/alternance/domaine_industrie.html",
+    "/fr-fr/alternance/domaine_ingenierie.html",
+    "/fr-fr/alternance/domaine_sante-social.html",
+    "/fr-fr/alternance/domaine_btp.html",
+    "/fr-fr/alternance/domaine_logistique-transport.html",
+    "/fr-fr/alternance/domaine_juridique.html",
+    "/fr-fr/alternance/domaine_restauration-tourisme-hotellerie-loisirs.html",
+    "/fr-fr/alternance/domaine_graphisme.html",
+    "/fr-fr/alternance/domaine_recherche.html",
+    "/fr-fr/alternance/domaine_telecom.html",
+    "/fr-fr/alternance/domaine_service.html",
+    "/fr-fr/alternance/domaine_administration.html",
+    "/fr-fr/alternance/domaine_production.html",
 
-def _env_int(key: str, default: int) -> int:
-    val = os.getenv(key)
-    try:
-        return int(val) if val else default
-    except ValueError:
-        return default
+    # ───────── Villes (top 14 villes étudiantes françaises) ─────────
+    "/fr-fr/alternance/ville_paris-75000.html",
+    "/fr-fr/alternance/ville_lyon-69000.html",
+    "/fr-fr/alternance/ville_toulouse-31000.html",
+    "/fr-fr/alternance/ville_marseille-13000.html",
+    "/fr-fr/alternance/ville_bordeaux-33000.html",
+    "/fr-fr/alternance/ville_nantes-44000.html",
+    "/fr-fr/alternance/ville_lille-59000.html",
+    "/fr-fr/alternance/ville_rennes-35000.html",
+    "/fr-fr/alternance/ville_strasbourg-67000.html",
+    "/fr-fr/alternance/ville_montpellier-34000.html",
+    "/fr-fr/alternance/ville_nice-06000.html",
+    "/fr-fr/alternance/ville_grenoble-38000.html",
+    "/fr-fr/alternance/ville_aix-en-provence-13100.html",
+    "/fr-fr/alternance/ville_dijon-21000.html",
 
-
-def _env_float(key: str, default: float) -> float:
-    val = os.getenv(key)
-    try:
-        return float(val) if val else default
-    except ValueError:
-        return default
-
-
-BASE_URL    = "https://www.hellowork.com"
-SEARCH_PATH = "/fr-fr/emploi/recherche.html"
-
-QUERY     = _env_str("SCRAPER_QUERY",    "alternance")
-LOCATION  = _env_str("SCRAPER_LOCATION", "france")
-MAX_PAGES = _env_int("SCRAPER_MAX_PAGES", 5)
-
-DELAY_MIN = _env_float("HW_DELAY_MIN", 3.0)
-DELAY_MAX = _env_float("HW_DELAY_MAX", 6.0)
-
-TIMEOUT   = 30.0  # secondes
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    # ───────── Catégories transverses populaires ─────────
+    "/fr-fr/alternance/mot-cle_teletravail.html",
+    "/fr-fr/alternance/mot-cle_bac-2.html",
 ]
 
+# Headers de navigateur réaliste pour éviter le 403
+BROWSER_HEADERS = {
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Sec-Ch-Ua":          '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile":   "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest":     "document",
+    "Sec-Fetch-Mode":     "navigate",
+    "Sec-Fetch-Site":     "none",
+    "Upgrade-Insecure-Requests": "1",
+}
 
-# =============================================================================
-# SECTION 3 – FONCTIONS UTILITAIRES
-# =============================================================================
-
-def clean_text(text: str | None) -> str:
-    if not text:
-        return ""
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def build_search_url(query: str, location: str, page: int = 1) -> str:
-    """Construit l'URL de recherche HelloWork avec les paramètres."""
-    params = {
-        "k":  query,
-        "l":  location,
-        "ray": "50",   # rayon 50 km
-    }
-    if page > 1:
-        params["p"] = str(page)
-
-    return f"{BASE_URL}{SEARCH_PATH}?{urlencode(params)}"
-
-
-def _default_headers() -> dict[str, str]:
-    return {
-        "User-Agent":      random.choice(USER_AGENTS),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-        "DNT":             "1",
-    }
+JOB_URL_PATTERN = re.compile(r"/fr-fr/emplois/\d+\.html")
 
 
 # =============================================================================
-# SECTION 4 – EXTRACTION D'UNE PAGE
+# SCRAPING — fonction principale
 # =============================================================================
 
-def extract_offers_from_html(html: str) -> list[JobOffer]:
+async def fetch_hellowork(
+    category_urls: list[str] | None = None,
+    delay:         float = 1.0,
+    timeout:       float = 30.0,
+) -> list[JobOffer]:
     """
-    Extrait les offres d'emploi depuis le HTML d'une page de résultats.
+    Récupère les offres d'alternance HelloWork sur toutes les catégories.
 
-    Sélecteurs HelloWork (structure au 2024-05) :
-        - Cartes : <li data-testid="job-card">
-        - Titre  : <p data-testid="job-title">
-        - Société: <p data-testid="job-company">
-        - Lieu   : <p data-testid="job-location">
-        - Contrat: <p data-testid="job-contract">
-        - Salaire: <p data-testid="job-salary">
-        - Lien   : <a href="..."> wrapping the card
+    Args:
+        category_urls : chemins relatifs à scraper. Par défaut : 34 URLs
+                        couvrant tous les profils étudiants et les
+                        principales villes françaises.
+        delay         : pause entre deux requêtes (secondes), 1.0 par défaut
+        timeout       : timeout par requête (secondes)
+
+    Returns:
+        Liste dédupliquée d'objets JobOffer.
     """
-    soup   = BeautifulSoup(html, "html.parser")
-    cards  = soup.find_all("li", attrs={"data-testid": "job-card"})
+    if category_urls is None:
+        category_urls = DEFAULT_CATEGORY_URLS
 
-    if not cards:
-        # Fallback sur les divs article en cas de changement de structure
-        cards = soup.find_all("article", class_=re.compile(r"job"))
+    all_offers: list[JobOffer] = []
+    seen_urls: set[str] = set()
+    failed_urls = 0
 
-    offers = []
-    for card in cards:
-        try:
-            title_el    = card.find(attrs={"data-testid": "job-title"})
-            company_el  = card.find(attrs={"data-testid": "job-company"})
-            location_el = card.find(attrs={"data-testid": "job-location"})
-            contract_el = card.find(attrs={"data-testid": "job-contract"})
-            salary_el   = card.find(attrs={"data-testid": "job-salary"})
-            desc_el     = card.find(attrs={"data-testid": "job-description"})
-            link_el     = card.find("a", href=True)
+    async with httpx.AsyncClient(
+        timeout=timeout, headers=BROWSER_HEADERS, follow_redirects=True,
+    ) as client:
+        for i, path in enumerate(category_urls, 1):
+            url = BASE_URL + path
+            print(f"[hellowork] {i}/{len(category_urls)} → {path}")
 
-            title    = clean_text(title_el.get_text()    if title_el    else "")
-            company  = clean_text(company_el.get_text()  if company_el  else "")
-            location = clean_text(location_el.get_text() if location_el else "")
-            contract = clean_text(contract_el.get_text() if contract_el else "Alternance")
-            salary   = clean_text(salary_el.get_text()   if salary_el   else "")
-            desc     = clean_text(desc_el.get_text()     if desc_el     else "")
-
-            href = link_el["href"] if link_el else ""
-            url  = href if href.startswith("http") else (f"{BASE_URL}{href}" if href else "")
-
-            if not title:
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    print(f"  [skip] Status {resp.status_code}")
+                    failed_urls += 1
+                    continue
+            except httpx.HTTPError as e:
+                print(f"  [skip] Erreur HTTP : {e}")
+                failed_urls += 1
                 continue
 
-            offers.append(JobOffer(
-                title=title,
-                company=company,
-                location=location,
-                contract_type=contract,
-                salary=salary,
-                description=desc,
-                url=url,
-                source="hellowork",
-            ))
+            soup = BeautifulSoup(resp.text, "html.parser")
+            page_offers = parse_offers_page(soup)
 
-        except Exception as e:
-            print(f"  [warn] HelloWork — erreur extraction card : {e}")
+            new_offers = [o for o in page_offers if o.url not in seen_urls]
+            for o in new_offers:
+                seen_urls.add(o.url)
+            all_offers.extend(new_offers)
+
+            print(f"  → {len(new_offers)} nouvelles (cumul : {len(all_offers)})")
+
+            if delay > 0 and i < len(category_urls):
+                await asyncio.sleep(delay)
+
+    print(f"\n[hellowork] Collecte terminée : {len(all_offers)} offres uniques "
+          f"({failed_urls} catégorie(s) en échec)")
+    return all_offers
+
+
+# =============================================================================
+# PARSING — extraction depuis le HTML
+# =============================================================================
+
+def parse_offers_page(soup: BeautifulSoup) -> list[JobOffer]:
+    """Parse toutes les offres présentes sur une page de résultats."""
+    offers: list[JobOffer] = []
+    seen_in_page: set[str] = set()
+
+    # Chaque offre apparaît dans deux liens : le lien principal (avec H3) et un
+    # lien "Voir l'offre". On ne garde que le principal pour récupérer le titre.
+    job_links = soup.find_all("a", href=JOB_URL_PATTERN)
+
+    for link in job_links:
+        href = link.get("href", "")
+        if not href or href in seen_in_page:
             continue
+
+        # On exige un H3 dans le lien — ça filtre les "Voir l'offre"
+        h3 = link.find(["h3", "h2"])
+        if not h3:
+            continue
+
+        seen_in_page.add(href)
+
+        # Trouver le container parent qui contient toutes les infos d'offre
+        container = link
+        for _ in range(8):
+            container = container.parent
+            if container is None or container.name == "body":
+                container = None
+                break
+            text = container.get_text(separator=" ", strip=True)
+            if len(text) > 60 and "Alternance" in text:
+                break
+
+        if container is None:
+            continue
+
+        offer = parse_offer_card(link, h3, container, href)
+        if offer and offer.title:
+            offers.append(offer)
 
     return offers
 
 
-def has_next_page(html: str, current_page: int) -> bool:
-    """Vérifie s'il existe une page suivante dans la pagination."""
-    soup = BeautifulSoup(html, "html.parser")
-    next_el = soup.find("a", attrs={"data-testid": "next-page"})
-    if next_el:
-        return True
-    # Fallback : cherche un lien vers page+1
-    return bool(soup.find("a", href=re.compile(rf"[?&]p={current_page + 1}")))
+def parse_offer_card(link, h3, container, href: str) -> JobOffer | None:
+    """Extrait les champs depuis le markup d'une carte d'offre."""
+
+    # Titre + entreprise via l'attribut title du lien (format : "Titre - Entreprise")
+    title_attr = link.get("title", "")
+    if " - " in title_attr:
+        title, _, company = title_attr.rpartition(" - ")
+        title   = title.strip()
+        company = company.strip()
+    else:
+        title   = h3.get_text(strip=True)
+        company = ""
+
+    # Texte complet du container, séparateur " | " pour parser ensuite
+    text = container.get_text(separator=" | ", strip=True)
+
+    # Localisation — pattern "Ville - département" (2-3 chiffres)
+    location = ""
+    loc_match = re.search(
+        r"\|\s*([A-Za-zÀ-ÿ][\wÀ-ÿ\-' ]{2,40})\s*-\s*(\d{2,3}[A-Z]?)\s*\|",
+        text,
+    )
+    if loc_match:
+        ville = loc_match.group(1).strip()
+        dept  = loc_match.group(2).strip()
+        if len(ville) >= 3 and not ville[0].isdigit():
+            location = f"{ville} ({dept})"
+
+    # Salaire — pattern "XXX,XX - X XXX,XX € / mois"
+    salary = ""
+    salary_match = re.search(
+        r"(\d{1,3}(?:[\s,]\d{3})*(?:[,.]\d{1,2})?"
+        r"(?:\s*-\s*\d{1,3}(?:[\s,]\d{3})*(?:[,.]\d{1,2})?)?"
+        r"\s*€\s*/\s*\w+)",
+        text,
+    )
+    if salary_match:
+        salary = salary_match.group(1).strip()
+
+    return JobOffer(
+        title         = title,
+        company       = company,
+        location      = location,
+        contract_type = "Alternance",
+        salary        = salary,
+        description   = "",
+        url           = urljoin(BASE_URL, href),
+        source        = "hellowork",
+        scraped_at    = datetime.now().isoformat(timespec="seconds"),
+    )
 
 
 # =============================================================================
-# SECTION 5 – SCRAPER PRINCIPAL
+# TEST STANDALONE — utilise la liste complète pour valider tous les profils
 # =============================================================================
 
-class HelloWorkScraper:
-    """
-    Scraper HelloWork basé sur httpx + BeautifulSoup.
+async def main():
+    """Lancement direct pour tester le scraper sur l'ensemble des catégories."""
+    print("=" * 70)
+    print(f"Test HelloWork — {len(DEFAULT_CATEGORY_URLS)} catégories")
+    print("=" * 70)
 
-    Plus léger qu'un scraper Playwright car HelloWork utilise du rendu
-    serveur (SSR). Les offres sont directement dans le HTML initial.
-    """
+    offers = await fetch_hellowork()  # utilise DEFAULT_CATEGORY_URLS
 
-    def __init__(
-        self,
-        query:     str = QUERY,
-        location:  str = LOCATION,
-        max_pages: int = MAX_PAGES,
-    ):
-        self.query     = query
-        self.location  = location
-        self.max_pages = max_pages
-        self.offers:     list[JobOffer] = []
-        self._seen_urls: set[str]       = set()
-        self.stats: dict = {
-            "query":             query,
-            "location":          location,
-            "started_at":        None,
-            "ended_at":          None,
-            "duration_seconds":  0.0,
-            "pages_scraped":     0,
-            "pages_blocked":     0,
-            "offers_total":      0,
-            "offers_new":        0,
-            "offers_duplicates": 0,
-        }
+    print(f"\n→ {len(offers)} offres récupérées au total\n")
 
-    def _add_offers(self, new_offers: list[JobOffer]) -> int:
-        added = 0
-        for o in new_offers:
-            key = o.url or f"{o.title}|{o.company}|{o.location}"
-            if key in self._seen_urls:
-                continue
-            self._seen_urls.add(key)
-            self.offers.append(o)
-            added += 1
-        self.stats["offers_new"]        += added
-        self.stats["offers_duplicates"] += len(new_offers) - added
-        self.stats["pages_scraped"]     += 1
-        return added
+    # Aperçu de la diversité : 1 offre par "source d'origine" si possible
+    seen_companies = set()
+    sample = []
+    for o in offers:
+        if o.company and o.company not in seen_companies and len(sample) < 10:
+            seen_companies.add(o.company)
+            sample.append(o)
 
-    async def _fetch_page(self, client: httpx.AsyncClient, url: str) -> str | None:
-        """Télécharge une page avec gestion des erreurs et retry minimal."""
-        for attempt in range(1, 3):
-            try:
-                response = await client.get(
-                    url,
-                    headers=_default_headers(),
-                    timeout=TIMEOUT,
-                    follow_redirects=True,
-                )
-                if response.status_code == 200:
-                    return response.text
-                if response.status_code == 429:
-                    wait = random.uniform(15, 30)
-                    print(f"  [warn] HelloWork rate-limit (429) — attente {wait:.0f}s")
-                    await asyncio.sleep(wait)
-                    continue
-                print(f"  [warn] HelloWork HTTP {response.status_code} sur {url}")
-                return None
-            except httpx.RequestError as e:
-                print(f"  [warn] HelloWork requête échouée (tentative {attempt}/2) : {e}")
-                if attempt < 2:
-                    await asyncio.sleep(random.uniform(5, 10))
-        return None
+    for i, o in enumerate(sample, 1):
+        print(f"--- Offre {i} ---")
+        print(f"  Titre      : {o.title}")
+        print(f"  Entreprise : {o.company}")
+        print(f"  Lieu       : {o.location}")
+        print(f"  Salaire    : {o.salary}")
+        print(f"  URL        : {o.url}")
+        print()
 
-    async def run(self) -> list[JobOffer]:
-        start = datetime.now()
-        self.stats["started_at"] = start.isoformat()
 
-        async with httpx.AsyncClient() as client:
-            for page_num in range(1, self.max_pages + 1):
-                url = build_search_url(self.query, self.location, page_num)
-                print(f"[hellowork] Page {page_num}/{self.max_pages} → {url}")
-
-                html = await self._fetch_page(client, url)
-                if not html:
-                    print(f"  [warn] Page {page_num} non chargée — arrêt")
-                    self.stats["pages_blocked"] += 1
-                    break
-
-                page_offers = extract_offers_from_html(html)
-                added       = self._add_offers(page_offers)
-                print(f"  → {len(page_offers)} offres ({added} nouvelles, {len(page_offers) - added} doublons)")
-
-                if not has_next_page(html, page_num):
-                    print("  [info] Dernière page atteinte")
-                    break
-
-                if page_num < self.max_pages:
-                    delay = random.uniform(DELAY_MIN, DELAY_MAX)
-                    print(f"  → pause {delay:.1f}s...")
-                    await asyncio.sleep(delay)
-
-        end = datetime.now()
-        self.stats["ended_at"]         = end.isoformat()
-        self.stats["duration_seconds"] = round((end - start).total_seconds(), 2)
-        self.stats["offers_total"]     = len(self.offers)
-
-        print(f"\n[hellowork] Terminé : {len(self.offers)} offres en {self.stats['duration_seconds']}s")
-        return self.offers
+if __name__ == "__main__":
+    asyncio.run(main())

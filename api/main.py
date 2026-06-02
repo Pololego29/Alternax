@@ -1,112 +1,142 @@
-"""
-api/main.py
-===========
-API FastAPI pour Alternax — sert les offres d'alternance.
-
-Le scraping est géré par GitHub Actions (.github/workflows/scrape.yml).
-L'API ne fait que lire/écrire en base et servir le frontend.
-
-Endpoints :
-    GET /api/offres     Liste paginée avec filtres
-    GET /api/stats      Statistiques globales
-    GET /api/sources    Sources disponibles
-
-Démarrage local :
-    uvicorn api.main:app --reload --port 8000
-
-Variables d'environnement :
-    DATABASE_URL  : PostgreSQL en prod (absent = SQLite local)
-    FRONTEND_URL  : Restreint le CORS à cette origine (absent = ouvert)
-"""
-
 import os
 import sys
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+# =============================================================================
+# 1. FIX WINDOWS (DOIT ÊTRE LA PREMIÈRE LIGNE)
+# =============================================================================
+# Ce moteur est le SEUL capable de gérer les processus Playwright sur Windows.
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# --- Chargement des variables d'environnement depuis .env ---
+# Nécessaire pour que FT_CLIENT_ID et FT_CLIENT_SECRET soient disponibles
+# quand on lance l'API en local. En prod (GitHub Actions, Render…), les
+# variables sont déjà injectées par la plateforme, donc load_dotenv ne fera rien.
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from database.db import init_db, get_offers, get_stats
-
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # =============================================================================
-# SECTION 1 – CYCLE DE VIE
+# 2. CONFIGURATION DES CHEMINS
 # =============================================================================
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+sys.path.insert(0, str(BASE_DIR))
+
+# Imports de tes modules
+try:
+    from database.db import init_db, get_offers, get_stats, get_dashboard_stats
+    # On importe l'orchestrateur unifié qui exécute TOUTES les sources
+    # (Indeed + France Travail + L'Étudiant) PUIS persiste en base.
+    from scrapers.run_scraper import main as run_all_scrapers
+    logging.info("Modules chargés.")
+except ImportError as e:
+    logging.error(f"Erreur import : {e}")
+    run_all_scrapers = None
+
+# =============================================================================
+# 3. CYCLE DE VIE (LIFESPAN)
+# =============================================================================
+scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[Alternax] Démarrage et mise à jour des données...")
     init_db()
-    print("[api] Base de données initialisée")
+
+    if run_all_scrapers:
+        # On planifie pour que ça tourne régulièrement (toutes les 30 min)
+        # → lance Indeed + France Travail + L'Étudiant + dédup + insert DB
+        scheduler.add_job(run_all_scrapers, 'interval', minutes=30, id='scrape_all_job')
+        scheduler.start()
+
+        # ACTUALISATION IMMÉDIATE : on lance le scrap tout de suite au démarrage
+        asyncio.create_task(run_all_scrapers())
+
     yield
-
+    if scheduler.running:
+        scheduler.shutdown()
 
 # =============================================================================
-# SECTION 2 – APPLICATION
+# 4. APPLICATION ET ROUTES
 # =============================================================================
-
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-
-_frontend_url = os.environ.get("FRONTEND_URL", "")
-_cors_origins  = [_frontend_url] if _frontend_url else ["*"]
-
-app = FastAPI(
-    title="Alternax – API Alternances",
-    description="Offres d'alternance collectées automatiquement",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Alternax API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
 
+# Montage pour le logo et les fichiers du front
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
-
-# =============================================================================
-# SECTION 3 – ENDPOINTS
-# =============================================================================
-
 @app.get("/")
-async def serve_frontend():
-    """Sert la page d'accueil en local (en prod, le frontend est sur Vercel)."""
+async def serve_home():
     return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+@app.get("/api/sources")
+async def list_sources():
+    """Retourne la liste des sources disponibles pour le frontend"""
+    return ["indeed", "france_travail", "letudiant", "hellowork"]
 
 
 @app.get("/api/offres")
 async def list_offres(
-    search:   str = Query("", description="Recherche titre, entreprise, description"),
-    location: str = Query("", description="Filtre par ville/région"),
-    source:   str = Query("", description="Filtre par source"),
-    page:     int = Query(1,  ge=1),
-    per_page: int = Query(20, ge=1, le=100),
+    search: str = "",
+    location: str = "",
+    source: str = "",
+    tech: str = "",
+    page: int = 1,
+    per_page: int = 20,
 ):
+    """
+    Liste paginée des offres avec filtres optionnels.
+
+    Paramètres :
+    - search   : recherche fulltext dans titre, entreprise, description
+    - location : filtre par ville/région (partial match)
+    - source   : filtre par source (indeed, france_travail, letudiant)
+    - tech     : filtre par tag technique (ex: "Python", "React")
+    - page     : numéro de page (défaut 1)
+    - per_page : nombre d'offres par page (défaut 20)
+    """
     offers, total = get_offers(
-        search=search, location=location, source=source,
+        search=search, location=location, source=source, tech=tech,
         page=page, per_page=per_page,
     )
     return {
-        "offers":   offers,
-        "total":    total,
-        "page":     page,
-        "per_page": per_page,
-        "pages":    max(1, -(-total // per_page)),
+        "offers": offers,
+        "total":  total,
+        "page":   page,
+        "pages":  max(1, -(-total // per_page)),
     }
 
 
 @app.get("/api/stats")
 async def api_stats():
+    """Stats globales : total, répartition par source, dernière collecte."""
     return get_stats()
 
 
-@app.get("/api/sources")
-async def api_sources():
-    return list(get_stats()["by_source"].keys())
+@app.get("/api/dashboard")
+async def api_dashboard(limit: int = 5):
+    """
+    Stats agrégées pour le dashboard frontend :
+    - top entreprises qui recrutent
+    - top localisations
+    - top technologies demandées
+    - répartition par source
+    """
+    return get_dashboard_stats(limit=limit)

@@ -3,24 +3,47 @@ scrapers/indeed.py
 ==================
 Scraper Indeed France pour les offres d'alternance.
 
-Utilise Playwright (Chromium) car Indeed charge ses offres via JavaScript.
-Lancer via : python -m scrapers.run_scraper
+Ce module utilise Playwright (navigateur headless) plutôt que requests/BeautifulSoup
+car Indeed charge ses offres via JavaScript. Un simple GET HTTP ne retourne pas
+les annonces — il faut un vrai navigateur.
 
-Variables d'environnement :
-    SCRAPER_QUERY       : Requête de recherche (défaut : "alternance")
-    SCRAPER_LOCATION    : Localisation (défaut : "France")
-    SCRAPER_MAX_PAGES   : Nombre de pages (défaut : 5)
-    SCRAPER_HEADLESS    : true/false — headless mode (défaut : false en local)
+Stratégie multi-requêtes : plutôt qu'une seule recherche "alternance France"
+(qui renvoie toujours les mêmes ~16 résultats sponsorisés en haut), on lance
+plusieurs requêtes ciblées (par métier + par ville) dans la même session
+Chromium. Volume attendu : ~80-130 offres uniques par run.
+
+Auteurs      : Alternax
+Dépendances  : playwright (pip install playwright && playwright install chromium)
+               playwright-stealth (pip install playwright-stealth)
+Sortie       : data/indeed_offers.csv  +  data/indeed_offers.json
+
+Utilisation rapide :
+    python scrapers/indeed.py
+
+Variables d'environnement (debug) :
+    INDEED_HEADLESS=0   → ouvre Chromium en mode visible (pour observer)
+    INDEED_SLOW_MO=500  → ralentit chaque action de N millisecondes
 """
 
 import asyncio
+import csv
+import json
 import os
 import random
 import re
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, fields, field
 from datetime import datetime
-
+from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+# --- Import optionnel de playwright-stealth ---
+try:
+    from playwright_stealth import Stealth
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+    print("[indeed] playwright-stealth non installé — fonctionnement dégradé.")
+    print("[indeed] Pour l'installer : pip install playwright-stealth")
 
 
 # =============================================================================
@@ -30,53 +53,63 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 @dataclass
 class JobOffer:
     """Représente une offre d'alternance normalisée, quelle que soit la source."""
-    title:         str
-    company:       str
-    location:      str
+    title: str
+    company: str
+    location: str
     contract_type: str
-    salary:        str
-    description:   str
-    url:           str
-    source:        str
-    scraped_at:    str = field(default_factory=lambda: datetime.now().isoformat())
+    salary: str
+    description: str
+    url: str
+    source: str
+    scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    category: str = ""
+
+    def __post_init__(self):
+        if self.scraped_at is None:
+            self.scraped_at = datetime.now().isoformat()
 
 
 # =============================================================================
 # SECTION 2 – CONFIGURATION
 # =============================================================================
 
-def _env_str(key: str, default: str) -> str:
-    val = os.getenv(key)
-    return val if val else default
+BASE_URL = "https://fr.indeed.com"
 
+# Liste des requêtes lancées par défaut. Couvre tous les profils étudiants
+# (tech + commerce + marketing + RH + finance) + 3 grandes villes.
+# Chaque requête renvoie ~16 offres en page 1.
+DEFAULT_QUERIES = [
+    # Par métier
+    "alternance développeur",
+    "alternance data",
+    "alternance marketing",
+    "alternance commerce",
+    "alternance ingénieur",
+    "alternance communication",
+    "alternance finance",
+    "alternance ressources humaines",
+    # Par ville (pour la diversité géographique)
+    "alternance Paris",
+    "alternance Lyon",
+    "alternance Toulouse",
+]
+DEFAULT_LOCATION = "France"
+MAX_RETRY = 2
 
-def _env_int(key: str, default: int) -> int:
-    val = os.getenv(key)
-    try:
-        return int(val) if val else default
-    except ValueError:
-        return default
+# Délais entre requêtes (en secondes)
+DELAY_MIN = 4.0
+DELAY_MAX = 7.0
 
+# Timeouts Playwright (en millisecondes)
+TIMEOUT_GOTO       = 60_000
+TIMEOUT_SELECTOR   = 30_000
+TIMEOUT_CLOUDFLARE = 30_000
 
-def _env_bool(key: str, default: bool) -> bool:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
+OUTPUT_DIR = Path(__file__).parent.parent / "data"
+DEBUG_DIR  = Path(__file__).parent.parent / "debug"
 
-
-BASE_URL  = "https://fr.indeed.com"
-QUERY     = _env_str("SCRAPER_QUERY",    "alternance")
-LOCATION  = _env_str("SCRAPER_LOCATION", "France")
-MAX_PAGES = _env_int("SCRAPER_MAX_PAGES", 5)
-MAX_RETRY = _env_int("SCRAPER_MAX_RETRY", 2)
-HEADLESS  = _env_bool("SCRAPER_HEADLESS", False)  # False en local, True en CI
-
-DELAY_MIN = 5.0
-DELAY_MAX = 9.0
-
-TIMEOUT_GOTO     = 60_000
-TIMEOUT_SELECTOR = 30_000
+HEADLESS = os.environ.get("INDEED_HEADLESS", "1") != "0"
+SLOW_MO  = int(os.environ.get("INDEED_SLOW_MO", "0"))
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -91,53 +124,150 @@ USER_AGENTS = [
 # =============================================================================
 
 def clean_text(text: str | None) -> str:
+    """Nettoie une chaîne HTML : supprime espaces multiples et sauts de ligne."""
     if not text:
         return ""
     return re.sub(r"\s+", " ", text).strip()
 
 
 async def human_scroll(page, steps: int = 4) -> None:
+    """Simule un défilement humain progressif sur la page."""
     for _ in range(steps):
         await page.mouse.wheel(0, random.randint(300, 600))
         await asyncio.sleep(random.uniform(0.3, 0.8))
 
 
 async def is_blocked(page) -> bool:
+    """Détecte si Indeed a affiché une page de blocage / CAPTCHA."""
     title = await page.title()
     keywords = ["captcha", "robot", "vérification", "verification", "blocked", "access denied"]
     return any(k in title.lower() for k in keywords)
 
 
+async def wait_for_cloudflare_pass(page, timeout: int = TIMEOUT_CLOUDFLARE) -> bool:
+    """
+    Attend que la page Cloudflare "Un instant…" se résolve.
+    Retourne True si le challenge est passé, False si on reste bloqué.
+    """
+    try:
+        await page.wait_for_function(
+            """() => {
+                const t = document.title.toLowerCase();
+                return !t.includes('moment') && !t.includes('instant')
+                       && !t.includes('vérification') && !t.includes('verification');
+            }""",
+            timeout=timeout,
+        )
+        return True
+    except PlaywrightTimeout:
+        return False
+
+
+async def dump_debug(page, label: str) -> None:
+    """Sauvegarde un screenshot + le HTML brut de la page actuelle dans debug/."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = DEBUG_DIR / f"{timestamp}_{label}"
+
+    try:
+        title = await page.title()
+        current_url = page.url
+        print(f"  [debug] Titre  : {title}")
+        print(f"  [debug] URL    : {current_url}")
+
+        await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+        html = await page.content()
+        base.with_suffix(".html").write_text(html, encoding="utf-8")
+        print(f"  [debug] Screenshot + HTML sauvegardés → {base}.png / .html")
+    except Exception as e:
+        print(f"  [debug] Échec de la capture : {e}")
+
+
 # =============================================================================
-# SECTION 4 – EXTRACTION D'UNE PAGE
+# SECTION 4 – EXTRACTION D'UNE PAGE DE RÉSULTATS
 # =============================================================================
 
+async def _try_first(card, selectors: list[tuple[str, str | None]]) -> str:
+    """
+    Essaie une cascade de sélecteurs. Chaque tuple = (selector_css, attribute).
+    Si attribute=None, prend l'inner_text. Sinon prend l'attribut.
+    Retourne le premier résultat non vide, ou "".
+    """
+    for sel, attr in selectors:
+        try:
+            el = await card.query_selector(sel)
+            if not el:
+                continue
+            if attr:
+                val = await el.get_attribute(attr)
+            else:
+                val = await el.inner_text()
+            if val and val.strip():
+                return clean_text(val)
+        except Exception:
+            continue
+    return ""
+
+
 async def extract_offers_from_page(page) -> list[JobOffer]:
+    """
+    Extrait toutes les offres présentes sur la page Indeed actuellement chargée.
+    Utilise une cascade de sélecteurs pour résister aux changements HTML d'Indeed.
+    """
     offers = []
 
     cards = await page.query_selector_all("div.job_seen_beacon")
-    if not cards:
+
+    if cards:
+        print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur principal).")
+    else:
         cards = await page.query_selector_all("li.css-5lfssm")
+        if cards:
+            print(f"  [debug] {len(cards)} cartes d'offres détectées (sélecteur secondaire).")
 
     if not cards:
         print("  [warn] Aucune card trouvée — sélecteurs à mettre à jour ou page bloquée")
         return offers
 
+    # Cascade de sélecteurs : Indeed change régulièrement, on essaie plusieurs variantes
     for card in cards:
         try:
-            title_el    = await card.query_selector("h2.jobTitle span[title]")
-            company_el  = await card.query_selector("span[data-testid='company-name']")
-            location_el = await card.query_selector("div[data-testid='text-location']")
-            salary_el   = await card.query_selector("div[data-testid='attribute_snippet_testid']")
-            desc_el     = await card.query_selector("div.job-snippet")
-            link_el     = await card.query_selector("a[data-jk]")
+            title = await _try_first(card, [
+                ("h2.jobTitle span[title]", "title"),     # ancien format
+                ("h2.jobTitle a", "aria-label"),           # aria-label sur le lien
+                ("h2.jobTitle a span", None),              # span dans le lien
+                ("h2.jobTitle span", None),                # span sans title attr
+                ("h2.jobTitle", None),                     # texte direct du h2
+                ("a[data-jk]", "aria-label"),              # aria-label du lien data-jk
+                ("[data-testid='job-title']", None),       # data-testid moderne
+                ("h2 a", None),                            # fallback générique
+            ])
 
-            title    = clean_text(await title_el.get_attribute("title") if title_el else None)
-            company  = clean_text(await company_el.inner_text()  if company_el  else None)
-            location = clean_text(await location_el.inner_text() if location_el else None)
-            salary   = clean_text(await salary_el.inner_text()   if salary_el   else None)
-            desc     = clean_text(await desc_el.inner_text()     if desc_el     else None)
+            company = await _try_first(card, [
+                ("span[data-testid='company-name']", None),
+                ("[data-testid='company-name']", None),
+                ("span.companyName", None),
+                ("a.companyOverviewLink", None),
+            ])
 
+            location = await _try_first(card, [
+                ("div[data-testid='text-location']", None),
+                ("[data-testid='text-location']", None),
+                ("div.companyLocation", None),
+            ])
+
+            salary = await _try_first(card, [
+                ("div[data-testid='attribute_snippet_testid']", None),
+                ("[data-testid='salary-snippet']", None),
+                ("div.salary-snippet", None),
+            ])
+
+            desc = await _try_first(card, [
+                ("div.job-snippet", None),
+                ("[data-testid='jobsnippet_footer']", None),
+            ])
+
+            link_el = await card.query_selector("a[data-jk]")
             job_key = await link_el.get_attribute("data-jk") if link_el else ""
             url = f"https://fr.indeed.com/viewjob?jk={job_key}" if job_key else ""
 
@@ -152,12 +282,26 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
                 salary=salary,
                 description=desc,
                 url=url,
-                source="indeed",
+                source="indeed"
             ))
 
         except Exception as e:
             print(f"  [warn] Erreur extraction card : {e}")
             continue
+
+    # DIAGNOSTIC : si on a détecté des cards mais extrait 0 offres,
+    # on dump le HTML de la première pour identifier le nouveau format.
+    if cards and not offers:
+        try:
+            first_html = await cards[0].inner_html()
+            print(f"  [DIAGNOSTIC] 0 offres extraites de {len(cards)} cards.")
+            print(f"  [DIAGNOSTIC] Indeed a probablement changé sa structure HTML.")
+            print(f"  [DIAGNOSTIC] HTML de la 1ère card (1500 premiers chars) :")
+            print("  " + "─" * 60)
+            print(first_html[:1500])
+            print("  " + "─" * 60)
+        except Exception:
+            pass
 
     return offers
 
@@ -168,163 +312,215 @@ async def extract_offers_from_page(page) -> list[JobOffer]:
 
 class IndeedScraper:
     """
-    Orchestre le scraping complet d'Indeed sur plusieurs pages.
+    Orchestre le scraping multi-requêtes d'Indeed.
 
-    Anti-détection : warm-up, scroll humain, rotation UA,
-    navigation via bouton Suivant, délais aléatoires, retry.
+    Lance plusieurs requêtes ciblées (par métier + par ville) dans la même
+    session Chromium pour maximiser la diversité des offres tout en gardant
+    une seule mécanique anti-détection.
+
+    Stratégie anti-détection :
+    - Stealth (playwright-stealth) pour masquer l'automatisation
+    - Warm-up sur la page d'accueil avant les recherches
+    - Attente du passage du challenge Cloudflare si présent
+    - Scroll humain sur chaque page
+    - Délais aléatoires entre les requêtes
+    - Retry automatique en cas d'échec
+    - Rotation des User-Agents
+    - Filtre fromage=3 → uniquement les offres des 3 derniers jours
     """
 
-    def __init__(self, query: str = QUERY, location: str = LOCATION, max_pages: int = MAX_PAGES):
-        self.query     = query
-        self.location  = location
-        self.max_pages = max_pages
-        self.offers:     list[JobOffer] = []
-        self._seen_urls: set[str]       = set()
-        self.stats: dict = {
-            "query":             query,
-            "location":          location,
-            "started_at":        None,
-            "ended_at":          None,
-            "duration_seconds":  0.0,
-            "pages_scraped":     0,
-            "pages_blocked":     0,
-            "offers_total":      0,
-            "offers_new":        0,
-            "offers_duplicates": 0,
-        }
+    def __init__(self, queries: list[str] | None = None, location: str = DEFAULT_LOCATION, **kwargs):
+        """
+        Args:
+            queries  : liste de mots-clés. Si None, utilise DEFAULT_QUERIES (11 requêtes).
+            location : localisation par défaut (peut être "France" ou une ville).
+            **kwargs : absorbe les anciens paramètres (query, max_pages) pour
+                       compatibilité ascendante avec l'orchestrateur existant.
+        """
+        self.queries  = queries if queries else DEFAULT_QUERIES
+        self.location = location
+        self.offers: list[JobOffer] = []
 
-    def _add_offers(self, new_offers: list[JobOffer]) -> int:
-        """Filtre les doublons intra-session et ajoute les offres uniques."""
-        added = 0
-        for o in new_offers:
-            key = o.url or f"{o.title}|{o.company}|{o.location}"
-            if key in self._seen_urls:
-                continue
-            self._seen_urls.add(key)
-            self.offers.append(o)
-            added += 1
-        self.stats["offers_new"]        += added
-        self.stats["offers_duplicates"] += len(new_offers) - added
-        self.stats["pages_scraped"]     += 1
-        return added
+        # Compatibilité ascendante : si l'ancien paramètre 'query' est passé
+        # avec une valeur non-défaut, on l'utilise comme requête supplémentaire.
+        legacy_query = kwargs.get('query')
+        if legacy_query and queries is None and legacy_query != "alternance":
+            self.queries = [legacy_query]
 
     async def _warmup(self, page) -> None:
+        """Visite la page d'accueil d'Indeed avant de lancer les recherches."""
         print("[indeed] Warm-up sur fr.indeed.com...")
         try:
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=TIMEOUT_GOTO)
+            if not await wait_for_cloudflare_pass(page):
+                print("  [warn] Cloudflare challenge non résolu pendant le warm-up")
             await asyncio.sleep(random.uniform(1.5, 3.0))
             await human_scroll(page, steps=2)
+            print(f"  [debug] Warm-up OK — titre : {await page.title()}")
         except PlaywrightTimeout:
             print("  [warn] Warm-up timeout – on continue quand même")
 
-    async def _load_page_with_retry(self, page, url: str, page_num: int) -> bool:
+    async def _load_page_with_retry(self, page, url: str, label: str) -> bool:
+        """
+        Charge une URL avec retry automatique.
+        En cas de timeout, capture une PNG et le HTML dans debug/ pour analyse.
+        """
         for attempt in range(1, MAX_RETRY + 1):
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_GOTO)
+
+                cf_passed = await wait_for_cloudflare_pass(page)
+                if not cf_passed:
+                    print(f"  [warn] Cloudflare challenge non résolu (tentative {attempt}/{MAX_RETRY})")
+                    await dump_debug(page, f"cloudflare_{label}_a{attempt}")
+                    if attempt < MAX_RETRY:
+                        wait = random.uniform(15, 30)
+                        print(f"  → attente {wait:.1f}s avant retry...")
+                        await asyncio.sleep(wait)
+                    continue
+
                 await page.wait_for_selector(
                     "div.job_seen_beacon, li.css-5lfssm",
                     timeout=TIMEOUT_SELECTOR,
                 )
+
                 if await is_blocked(page):
                     print(f"  [warn] Page bloquée (tentative {attempt}/{MAX_RETRY})")
+                    await dump_debug(page, f"blocked_{label}_a{attempt}")
                     await asyncio.sleep(random.uniform(10, 20))
                     continue
+
                 return True
+
             except PlaywrightTimeout:
-                print(f"  [warn] Timeout page {page_num + 1} (tentative {attempt}/{MAX_RETRY})")
+                print(f"  [warn] Timeout (tentative {attempt}/{MAX_RETRY})")
+                await dump_debug(page, f"timeout_{label}_a{attempt}")
                 if attempt < MAX_RETRY:
                     wait = random.uniform(8, 15)
                     print(f"  → attente {wait:.1f}s avant retry...")
                     await asyncio.sleep(wait)
+
         return False
 
-    async def _go_to_next_page(self, page) -> bool:
-        try:
-            next_btn = await page.query_selector('a[data-testid="pagination-page-next"]')
-            if not next_btn:
-                print("  [info] Pas de bouton Suivant — dernière page atteinte")
-                return False
-            await next_btn.scroll_into_view_if_needed()
-            await asyncio.sleep(random.uniform(0.5, 1.2))
-            await next_btn.click()
-            await page.wait_for_selector(
-                "div.job_seen_beacon, li.css-5lfssm",
-                timeout=TIMEOUT_SELECTOR,
-            )
-            return True
-        except PlaywrightTimeout:
-            print("  [warn] Timeout après clic Suivant")
-            return False
-        except Exception as e:
-            print(f"  [warn] Erreur navigation Suivant : {e}")
-            return False
-
     async def run(self) -> list[JobOffer]:
-        start = datetime.now()
-        self.stats["started_at"] = start.isoformat()
-
+        """
+        Lance le scraping multi-requêtes : pour chaque requête de self.queries,
+        navigue vers la page de résultats et extrait les offres. Une seule
+        session Chromium est utilisée pour toutes les requêtes (gain de temps).
+        """
         async with async_playwright() as p:
+            print(f"[indeed] Lancement Chromium (headless={HEADLESS}, slow_mo={SLOW_MO}ms)")
             browser = await p.chromium.launch(
                 headless=HEADLESS,
+                slow_mo=SLOW_MO,
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
+
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 locale="fr-FR",
                 viewport={
-                    "width":  random.randint(1200, 1400),
-                    "height": random.randint(750,  900),
+                    "width": random.randint(1200, 1400),
+                    "height": random.randint(750, 900),
                 },
                 extra_http_headers={"Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"},
             )
+
+            if STEALTH_AVAILABLE:
+                stealth = Stealth()
+                await stealth.apply_stealth_async(context)
+                print("[indeed] Stealth activé")
+
             page = await context.new_page()
+
             await page.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
 
+            # --- Warm-up ---
             await self._warmup(page)
 
-            first_url = (
-                f"{BASE_URL}/jobs?q={self.query.replace(' ', '+')}"
-                f"&l={self.location.replace(' ', '+')}&sort=date"
-            )
-            print(f"\n[indeed] Page 1/{self.max_pages} → {first_url}")
+            # --- Boucle sur chaque requête ---
+            seen_urls = set()
+            print(f"\n[indeed] Démarrage du scraping multi-requêtes ({len(self.queries)} requêtes)")
 
-            if not await self._load_page_with_retry(page, first_url, 0):
-                print("[indeed] Impossible de charger la page 1 — abandon")
-                await browser.close()
-                return self.offers
+            for i, query in enumerate(self.queries, 1):
+                url = (
+                    f"{BASE_URL}/jobs?q={query.replace(' ', '+')}"
+                    f"&l={self.location.replace(' ', '+')}"
+                    f"&sort=date&fromage=3"
+                )
+                label = f"q{i}_{query.replace(' ', '_')[:30]}"
+                print(f"\n[indeed] Requête {i}/{len(self.queries)} : '{query}'")
+                print(f"  → {url}")
 
-            await human_scroll(page)
-            page_offers = await extract_offers_from_page(page)
-            added = self._add_offers(page_offers)
-            print(f"  → {len(page_offers)} offres ({added} nouvelles, {len(page_offers) - added} doublons)")
-
-            for page_num in range(1, self.max_pages):
-                delay = random.uniform(DELAY_MIN, DELAY_MAX)
-                print(f"  → pause {delay:.1f}s...")
-                await asyncio.sleep(delay)
-
-                print(f"[indeed] Page {page_num + 1}/{self.max_pages} → clic Suivant")
-                if not await self._go_to_next_page(page):
-                    break
-
-                if await is_blocked(page):
-                    print("  [warn] Page bloquée après navigation — arrêt")
-                    self.stats["pages_blocked"] += 1
-                    break
+                if not await self._load_page_with_retry(page, url, label):
+                    print(f"[indeed] Échec sur '{query}' — on passe à la suivante")
+                    continue
 
                 await human_scroll(page)
                 page_offers = await extract_offers_from_page(page)
-                added = self._add_offers(page_offers)
-                print(f"  → {len(page_offers)} offres ({added} nouvelles, {len(page_offers) - added} doublons)")
+
+                # Déduplication intra-run par URL
+                new_offers = [o for o in page_offers if o.url and o.url not in seen_urls]
+                for o in new_offers:
+                    seen_urls.add(o.url)
+                self.offers.extend(new_offers)
+
+                print(f"  → {len(page_offers)} offres extraites ({len(new_offers)} nouvelles, cumul : {len(self.offers)})")
+
+                # Pause entre requêtes (sauf après la dernière)
+                if i < len(self.queries):
+                    delay = random.uniform(DELAY_MIN, DELAY_MAX)
+                    print(f"  → pause {delay:.1f}s avant prochaine recherche...")
+                    await asyncio.sleep(delay)
 
             await browser.close()
 
-        end = datetime.now()
-        self.stats["ended_at"]          = end.isoformat()
-        self.stats["duration_seconds"]  = round((end - start).total_seconds(), 2)
-        self.stats["offers_total"]      = len(self.offers)
-
-        print(f"\n[indeed] Terminé : {len(self.offers)} offres en {self.stats['duration_seconds']}s")
+        print(f"\n[indeed] Collecte terminée : {len(self.offers)} offres uniques au total")
         return self.offers
+
+
+# =============================================================================
+# SECTION 6 – EXPORT DES DONNÉES
+# =============================================================================
+
+    def save_csv(self, filename: str = "indeed_offers.csv") -> Path:
+        """Sauvegarde les offres en CSV dans OUTPUT_DIR."""
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUTPUT_DIR / filename
+        fieldnames = [f.name for f in fields(JobOffer)]
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(asdict(o) for o in self.offers)
+
+        print(f"[indeed] CSV sauvegardé → {path}")
+        return path
+
+    def save_json(self, filename: str = "indeed_offers.json") -> Path:
+        """Sauvegarde les offres en JSON pretty-printed dans OUTPUT_DIR."""
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUTPUT_DIR / filename
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([asdict(o) for o in self.offers], f, ensure_ascii=False, indent=2)
+
+        print(f"[indeed] JSON sauvegardé → {path}")
+        return path
+
+
+# =============================================================================
+# SECTION 7 – POINT D'ENTRÉE
+# =============================================================================
+
+async def main():
+    scraper = IndeedScraper()  # utilise DEFAULT_QUERIES par défaut
+    await scraper.run()
+    scraper.save_csv()
+    scraper.save_json()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
