@@ -155,11 +155,11 @@ async function loadOffers(page = 1) {
 
 function renderCard(offer) {
   const salary = offer.salary
-    ? `<span>💰 ${escapeHtml(offer.salary)}</span>`
+    ? `<span>${escapeHtml(offer.salary)}</span>`
     : "";
 
   const date = offer.scraped_at
-    ? `<span>🕐 ${formatDate(offer.scraped_at)}</span>`
+    ? `<span>${formatDate(offer.scraped_at)}</span>`
     : "";
 
   const desc = offer.description
@@ -185,7 +185,7 @@ function renderCard(offer) {
         <p class="offer-company">${escapeHtml(offer.company || "Entreprise non précisée")}</p>
       </div>
       <div class="offer-meta">
-        ${offer.location ? `<span>📍 ${escapeHtml(offer.location)}</span>` : ""}
+        ${offer.location ? `<span>${escapeHtml(offer.location)}</span>` : ""}
         ${salary}
         ${date}
       </div>

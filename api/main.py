@@ -38,9 +38,9 @@ try:
     # On importe l'orchestrateur unifié qui exécute TOUTES les sources
     # (Indeed + France Travail + L'Étudiant) PUIS persiste en base.
     from scrapers.run_scraper import main as run_all_scrapers
-    logging.info("✅ Modules chargés.")
+    logging.info("Modules chargés.")
 except ImportError as e:
-    logging.error(f"⚠️ Erreur import : {e}")
+    logging.error(f"Erreur import : {e}")
     run_all_scrapers = None
 
 # =============================================================================
@@ -50,7 +50,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 [Alternax] Démarrage et mise à jour des données...")
+    print("[Alternax] Démarrage et mise à jour des données...")
     init_db()
 
     if run_all_scrapers:

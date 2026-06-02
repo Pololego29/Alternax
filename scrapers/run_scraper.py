@@ -45,7 +45,7 @@ async def main() -> None:
         indeed = IndeedScraper(query="alternance", location="France", max_pages=5)
         all_offers.extend(await indeed.run())
     except Exception as e:
-        print(f"[scraper] ⚠️ Erreur Indeed : {e}")
+        print(f"[scraper] Erreur Indeed : {e}")
     print(f"[scraper] Total accumulé après Indeed : {len(all_offers)} offres")
 
     print("[scraper] Démarrage de la source France Travail...")
@@ -53,7 +53,7 @@ async def main() -> None:
         ft = FranceTravailSource(query="alternance", max_results=1000)
         all_offers.extend(await ft.run())
     except Exception as e:
-        print(f"[scraper] ⚠️ Erreur France Travail : {e}")
+        print(f"[scraper] Erreur France Travail : {e}")
     print(f"[scraper] Total accumulé après France Travail : {len(all_offers)} offres")
 
     print("[scraper] Démarrage de la source L'Étudiant...")
@@ -61,14 +61,14 @@ async def main() -> None:
         letu = LEtudiantSource(max_pages=20, limit=50)
         all_offers.extend(await letu.run())
     except Exception as e:
-        print(f"[scraper] ⚠️ Erreur L'Étudiant : {e}")
+        print(f"[scraper] Erreur L'Étudiant : {e}")
     print(f"[scraper] Total accumulé après L'Étudiant : {len(all_offers)} offres")
 
     print("[scraper] Démarrage de la source HelloWork...")
     try:
         all_offers.extend(await fetch_hellowork())
     except Exception as e:
-        print(f"[scraper] ⚠️ Erreur HelloWork : {e}")
+        print(f"[scraper] Erreur HelloWork : {e}")
     print(f"[scraper] Total accumulé après HelloWork : {len(all_offers)} offres")
 
     inserted = process_and_save(all_offers)

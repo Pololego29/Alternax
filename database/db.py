@@ -157,13 +157,6 @@ def _params(offer: dict) -> list:
     ]
 
 
-def insert_offer(offer: dict) -> bool:
-    """Insère une offre. Retourne True si insérée, False si déjà existante."""
-    with get_conn() as conn:
-        cur = conn.execute(_INSERT_SQL, _params(offer))
-        return cur.rowcount > 0
-
-
 def insert_offers_bulk(offers: list[dict]) -> int:
     """Insère plusieurs offres en une transaction. Retourne le nombre inséré."""
     inserted = 0
@@ -336,26 +329,3 @@ def url_exists(url: str) -> bool:
             "SELECT 1 FROM offers WHERE url = ?", [url]
         ).fetchone()
         return row is not None
-
-
-def populate_missing_tags() -> int:
-    """
-    Migration unique : remplit tech_tags pour les offres existantes qui n'en
-    ont pas. À appeler une seule fois après l'ajout de la colonne, depuis
-    un script ou un shell Python. Retourne le nombre d'offres mises à jour.
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, title, description FROM offers WHERE tech_tags IS NULL OR tech_tags = '[]' OR tech_tags = ''"
-        ).fetchall()
-
-        updated = 0
-        for row in rows:
-            tags = extract_tech_tags(row["title"] or "", row["description"] or "")
-            if tags:  # on ne met à jour que si on a trouvé quelque chose
-                conn.execute(
-                    "UPDATE offers SET tech_tags = ? WHERE id = ?",
-                    [json.dumps(tags), row["id"]],
-                )
-                updated += 1
-    return updated

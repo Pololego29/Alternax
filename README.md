@@ -53,8 +53,12 @@ API (FastAPI + APScheduler)
     ▼
 Frontend (HTML / JS vanilla + dashboard analytique)
 ```
+
+```
 Alternax/
-├── requirements.txt              # Dépendances API (FastAPI, uvicorn…)
+├── run.py                        # Lancement du serveur (utile sous Windows)
+├── Procfile                      # Commande de démarrage (déploiement)
+├── requirements.txt              # Dépendances API (FastAPI, uvicorn, APScheduler…)
 ├── requirements-scraper.txt      # Dépendances scraping (Playwright, httpx, BS4…)
 ├── .env                          # Credentials locaux (gitignoré)
 ├── .github/
@@ -76,13 +80,12 @@ Alternax/
 ├── frontend/
 │   ├── index.html                # Dashboard + liste + filtres
 │   ├── style.css
+│   ├── config.js                 # URL de l'API (local / production)
 │   └── app.js
-├── tests/
-│   ├── test_enrichment.py        # 15 tests sur l'extraction de tags
-│   └── test_hellowork.py         # 13 tests sur le parser HelloWork
-└── docs/
-├── TESTS_GUIDE.md            # Pas-à-pas pour exécuter les tests
-└── BACKLOG_SETUP.md          # Pas-à-pas pour le backlog GitHub Projects
+└── tests/
+    ├── test_enrichment.py        # 15 tests sur l'extraction de tags
+    └── test_hellowork.py         # 13 tests sur le parser HelloWork
+```
 
 ## Stack technique
 
@@ -117,9 +120,12 @@ playwright install chromium
 ### Variables d'environnement
 
 Pour utiliser la source France Travail, crée un fichier `.env` à la racine du projet :
+
+```bash
 FT_CLIENT_ID=ton_client_id
 FT_CLIENT_SECRET=ton_client_secret
 INDEED_HEADLESS=0
+```
 
 `INDEED_HEADLESS=0` force le navigateur Indeed à s'ouvrir en mode visible (sans cela, Cloudflare bloque systématiquement les requêtes headless en local).
 
@@ -151,6 +157,7 @@ Lance les quatre sources dans l'ordre (Indeed → France Travail → L'Étudiant
 ### Lancer les tests
 
 ```bash
+pip install pytest          # non inclus dans les requirements
 python -m pytest tests/ -v
 ```
 
@@ -190,17 +197,22 @@ Toute la chaîne repose sur un `dataclass` commun :
 ```python
 @dataclass
 class JobOffer:
-    title         : str        # Intitulé du poste
-    company       : str        # Nom de l'entreprise
-    location      : str        # Ville ou région
-    contract_type : str        # Type de contrat
-    salary        : str        # Rémunération (vide si non renseignée)
-    description   : str        # Extrait de la description
-    url           : str        # Lien unique (clé de déduplication)
-    source        : str        # Identifiant de la source
-    scraped_at    : str        # Horodatage ISO 8601
-    tech_tags     : list[str]  # Technologies détectées (Python, React, AWS…)
+    title         : str   # Intitulé du poste
+    company       : str   # Nom de l'entreprise
+    location      : str   # Ville ou région
+    contract_type : str   # Type de contrat
+    salary        : str   # Rémunération (vide si non renseignée)
+    description   : str   # Extrait de la description
+    url           : str   # Lien unique (clé de déduplication)
+    source        : str   # Identifiant de la source
+    scraped_at    : str   # Horodatage ISO 8601
+    category      : str   # Domaine métier (renseigné par France Travail / L'Étudiant)
 ```
+
+Les `tech_tags` (Python, React, AWS…) ne sont pas portés par le scraper : ils sont
+calculés automatiquement à partir du titre et de la description **au moment de
+l'insertion en base** (voir `pipeline/enrichment.py`), puis stockés dans la colonne
+`tech_tags` de la table `offers`.
 
 Chaque nouvelle source doit retourner des `JobOffer` — le pipeline et la base n'ont pas à changer.
 
@@ -251,6 +263,8 @@ Contrairement à France Travail, L'Étudiant et HelloWork qui exposent des conte
 - [ ] **Phase 11** — Production : PostgreSQL hébergé · Docker · déploiement VPS · domaine personnalisé
 
 ## Dépendances principales
+
+```text
 fastapi>=0.111           # Framework API REST asynchrone
 uvicorn[standard]>=0.29  # Serveur ASGI
 apscheduler>=3.10        # Scheduler cron intégré
@@ -261,5 +275,6 @@ beautifulsoup4>=4.12.0   # Parsing HTML (HelloWork)
 python-dotenv>=1.0.0     # Chargement des variables d'environnement
 python-multipart>=0.0.9  # Formulaires FastAPI
 psycopg2-binary>=2.9     # Driver PostgreSQL (production)
-pytest>=8.0              # Tests unitaires
+pytest>=8.0              # Tests unitaires (non inclus dans requirements.txt)
+```
 
