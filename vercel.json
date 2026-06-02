@@ -1,8 +1,5 @@
 {
   "buildCommand": "node scripts/build.js",
   "outputDirectory": ".",
-  "framework": null,
-  "rewrites": [
-    { "source": "/static/(.*)", "destination": "/$1" }
-  ]
+  "framework": null
 }
