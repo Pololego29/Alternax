@@ -107,12 +107,16 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_location ON offers(location)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_created  ON offers(created_at)")
 
-        # Migration douce : ajoute la colonne tech_tags si elle n'existe pas
-        # (utile si la table était déjà créée avant cette modification)
-        try:
+    # Migration douce, dans sa PROPRE transaction : ajoute tech_tags aux tables
+    # créées avant l'ajout de cette colonne. L'isolation est indispensable car
+    # sur PostgreSQL une instruction en échec invalide toute la transaction —
+    # si l'ALTER était dans le bloc ci-dessus, il annulerait la création de la
+    # table sur une base neuve (la colonne existe déjà → ALTER échoue).
+    try:
+        with get_conn() as conn:
             conn.execute("ALTER TABLE offers ADD COLUMN tech_tags TEXT DEFAULT '[]'")
-        except Exception:
-            pass  # colonne déjà existante, on ignore
+    except Exception:
+        pass  # colonne déjà existante, on ignore
 
 
 # =============================================================================
