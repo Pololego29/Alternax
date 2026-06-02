@@ -63,7 +63,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_all_scrapers())
 
     yield
-    scheduler.shutdown()
+    if scheduler.running:
+        scheduler.shutdown()
 
 # =============================================================================
 # 4. APPLICATION ET ROUTES
