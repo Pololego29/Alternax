@@ -71,9 +71,14 @@ async def lifespan(app: FastAPI):
 # =============================================================================
 app = FastAPI(title="Alternax API", lifespan=lifespan)
 
+# CORS : si FRONTEND_URL est défini (prod), on restreint à cette origine ;
+# sinon (local, variable vide) on ouvre à tout le monde.
+_frontend_url = os.environ.get("FRONTEND_URL", "").strip()
+_allowed_origins = [_frontend_url] if _frontend_url else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_methods=["GET"],
     allow_headers=["*"],
 )
