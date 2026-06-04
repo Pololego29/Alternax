@@ -107,6 +107,37 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_location ON offers(location)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_created  ON offers(created_at)")
 
+        # --- Comptes utilisateurs (connexion simple email + mot de passe) ---
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS users (
+                id            {_SCHEMA_PK},
+                email         TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at    {_SCHEMA_TS}
+            )
+        """)
+
+        # --- Sessions (token opaque → utilisateur) ---
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token      TEXT PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                created_at {_SCHEMA_TS}
+            )
+        """)
+
+        # --- Favoris (une ligne par offre mise en favori par un utilisateur) ---
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS favorites (
+                id         {_SCHEMA_PK},
+                user_id    INTEGER NOT NULL,
+                offer_id   INTEGER NOT NULL,
+                created_at {_SCHEMA_TS},
+                UNIQUE (user_id, offer_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fav_user ON favorites(user_id)")
+
     # Migration douce, dans sa PROPRE transaction : ajoute tech_tags aux tables
     # créées avant l'ajout de cette colonne. L'isolation est indispensable car
     # sur PostgreSQL une instruction en échec invalide toute la transaction —
@@ -333,3 +364,104 @@ def url_exists(url: str) -> bool:
             "SELECT 1 FROM offers WHERE url = ?", [url]
         ).fetchone()
         return row is not None
+
+
+# =============================================================================
+# SECTION 5 – UTILISATEURS, SESSIONS & FAVORIS
+# =============================================================================
+
+def create_user(email: str, password_hash: str) -> dict:
+    """Crée un utilisateur et retourne sa ligne (id, email)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+            [email, password_hash],
+        )
+    return get_user_by_email(email)
+
+
+def get_user_by_email(email: str) -> dict | None:
+    """Récupère un utilisateur par email (ou None)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = ?", [email]
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_session(token: str, user_id: int) -> None:
+    """Enregistre un token de session pour un utilisateur."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, user_id) VALUES (?, ?)", [token, user_id]
+        )
+
+
+def get_user_by_token(token: str) -> dict | None:
+    """Retrouve l'utilisateur associé à un token de session (ou None)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id, u.email
+            FROM sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.token = ?
+            """,
+            [token],
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_session(token: str) -> None:
+    """Supprime un token de session (déconnexion)."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", [token])
+
+
+# INSERT idempotent : ne fait rien si le favori existe déjà.
+_FAV_INSERT_SQL = (
+    "INSERT INTO favorites (user_id, offer_id) VALUES (?, ?) "
+    "ON CONFLICT (user_id, offer_id) DO NOTHING"
+    if _USE_PG else
+    "INSERT OR IGNORE INTO favorites (user_id, offer_id) VALUES (?, ?)"
+)
+
+
+def add_favorite(user_id: int, offer_id: int) -> None:
+    """Ajoute une offre aux favoris d'un utilisateur (sans doublon)."""
+    with get_conn() as conn:
+        conn.execute(_FAV_INSERT_SQL, [user_id, offer_id])
+
+
+def remove_favorite(user_id: int, offer_id: int) -> None:
+    """Retire une offre des favoris d'un utilisateur."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM favorites WHERE user_id = ? AND offer_id = ?",
+            [user_id, offer_id],
+        )
+
+
+def get_favorite_ids(user_id: int) -> list[int]:
+    """Liste des ids d'offres mises en favori par l'utilisateur."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT offer_id FROM favorites WHERE user_id = ?", [user_id]
+        ).fetchall()
+    return [r["offer_id"] for r in rows]
+
+
+def get_favorite_offers(user_id: int) -> list[dict]:
+    """Offres complètes mises en favori, les plus récemment ajoutées d'abord."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT o.id, o.title, o.company, o.location, o.contract_type,
+                   o.salary, o.description, o.url, o.source, o.scraped_at,
+                   o.tech_tags, o.created_at
+            FROM favorites f JOIN offers o ON o.id = f.offer_id
+            WHERE f.user_id = ?
+            ORDER BY f.created_at DESC
+            """,
+            [user_id],
+        ).fetchall()
+    return [_parse_tags(dict(r)) for r in rows]

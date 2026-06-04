@@ -21,14 +21,77 @@
           <span class="text-xs text-gray-500">Agrégateur d'offres d'alternance</span>
         </div>
       </div>
-      <button
-        onclick="refresh()"
-        class="text-sm text-blue-600 hover:text-white hover:bg-blue-600 border border-blue-200 hover:border-blue-600 px-4 py-1.5 rounded-lg transition"
-      >
-        ↻ Actualiser
-      </button>
+      <div class="flex items-center gap-2">
+        <!-- Zone visiteur (déconnecté) -->
+        <div id="auth-logged-out">
+          <button
+            onclick="openAuthModal()"
+            class="text-sm text-blue-600 hover:text-white hover:bg-blue-600 border border-blue-200 hover:border-blue-600 px-4 py-1.5 rounded-lg transition"
+          >
+            Se connecter
+          </button>
+        </div>
+
+        <!-- Zone connecté -->
+        <div id="auth-logged-in" class="hidden items-center gap-2">
+          <button
+            id="fav-toggle"
+            onclick="toggleFavoritesView()"
+            class="text-sm text-gray-600 hover:text-blue-600 border border-gray-200 hover:border-blue-200 px-3 py-1.5 rounded-lg transition"
+          >
+            ♥ Mes favoris
+          </button>
+          <span id="user-email" class="text-sm text-gray-500 hidden sm:inline"></span>
+          <button
+            onclick="logout()"
+            class="text-sm text-gray-400 hover:text-gray-700 px-2 py-1.5 rounded-lg hover:bg-gray-100 transition"
+            title="Se déconnecter"
+          >
+            Déconnexion
+          </button>
+        </div>
+
+        <button
+          onclick="refresh()"
+          class="text-sm text-blue-600 hover:text-white hover:bg-blue-600 border border-blue-200 hover:border-blue-600 px-4 py-1.5 rounded-lg transition"
+        >
+          ↻ Actualiser
+        </button>
+      </div>
     </div>
   </header>
+
+  <!-- ===== MODALE DE CONNEXION / INSCRIPTION ===== -->
+  <div id="auth-modal" class="modal-overlay hidden" onclick="if(event.target===this) closeAuthModal()">
+    <div class="modal-box">
+      <button class="modal-close" onclick="closeAuthModal()" aria-label="Fermer">✕</button>
+      <h2 id="auth-title" class="text-lg font-semibold text-gray-800 mb-1">Connexion</h2>
+      <p id="auth-subtitle" class="text-sm text-gray-500 mb-4">Connecte-toi pour retrouver tes offres favorites.</p>
+
+      <form id="auth-form" onsubmit="submitAuth(event)" class="flex flex-col gap-3">
+        <input
+          id="auth-email" type="email" placeholder="Adresse email" autocomplete="email" required
+          class="border border-gray-200 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+        />
+        <input
+          id="auth-password" type="password" placeholder="Mot de passe" autocomplete="current-password" required
+          class="border border-gray-200 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+        />
+        <p id="auth-error" class="text-sm text-red-600 hidden"></p>
+        <button id="auth-submit" type="submit"
+          class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+          Se connecter
+        </button>
+      </form>
+
+      <p class="text-sm text-gray-500 mt-4 text-center">
+        <span id="auth-switch-text">Pas encore de compte ?</span>
+        <button onclick="toggleAuthMode()" id="auth-switch-btn" class="text-blue-600 hover:underline font-medium">
+          Créer un compte
+        </button>
+      </p>
+    </div>
+  </div>
 
   <!-- ===== STATS BAR ===== -->
   <div class="bg-gradient-to-r from-blue-600 to-blue-700 text-white">
@@ -123,8 +186,8 @@
     </div>
 
     <div id="empty-state" class="hidden text-center py-16 text-gray-400">
-      <p class="text-2xl mb-2">Aucune offre trouvée</p>
-      <p class="text-sm">Essayez d'élargir vos filtres</p>
+      <p id="empty-title" class="text-2xl mb-2">Aucune offre trouvée</p>
+      <p id="empty-subtitle" class="text-sm">Essayez d'élargir vos filtres</p>
     </div>
 
     <div id="loading" class="hidden text-center py-12">

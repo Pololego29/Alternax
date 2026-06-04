@@ -9,15 +9,31 @@ let currentPage  = 1;
 let currentTech  = "";          // tag tech actif (ex: "Python")
 let debounceTimer = null;
 
+// --- État connexion / favoris ---
+let authToken   = localStorage.getItem("alternax_token") || "";
+let authEmail   = localStorage.getItem("alternax_email") || "";
+let favoriteIds = new Set();    // ids des offres en favori (utilisateur connecté)
+let authMode    = "login";      // "login" | "register" (modale)
+let viewMode    = "all";        // "all" | "favorites"
+let lastOffers  = [];           // offres actuellement affichées (pour re-rendu local)
+
 // =============================================================================
 // INITIALISATION
 // =============================================================================
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  applyAuthMode();
+  renderAuthUI();
   loadStats();
   loadSources();
   loadDashboard();
-  loadOffers(1);
+  await loadOffers(1);
+  restoreSession();   // valide le token et charge les favoris si déjà connecté
+});
+
+// Fermer la modale avec la touche Échap
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeAuthModal();
 });
 
 // =============================================================================
@@ -114,6 +130,8 @@ async function loadSources() {
 // =============================================================================
 
 async function loadOffers(page = 1) {
+  viewMode = "all";
+  updateFavToggleUI();
   currentPage = page;
   showLoading(true);
 
@@ -132,21 +150,39 @@ async function loadOffers(page = 1) {
 
   if (!data) return;
 
-  const grid  = document.getElementById("offers-grid");
-  const empty = document.getElementById("empty-state");
-  const count = document.getElementById("result-count");
-
-  if (data.offers.length === 0) {
-    grid.innerHTML = "";
-    empty.classList.remove("hidden");
-    count.textContent = "";
-  } else {
-    empty.classList.add("hidden");
-    count.textContent = `${data.total.toLocaleString("fr-FR")} offres trouvées`;
-    grid.innerHTML = data.offers.map(renderCard).join("");
-  }
+  lastOffers = data.offers;
+  showResults(data.offers, {
+    count: data.offers.length ? `${data.total.toLocaleString("fr-FR")} offres trouvées` : "",
+    emptyTitle: "Aucune offre trouvée",
+    emptySubtitle: "Essayez d'élargir vos filtres",
+  });
 
   renderPagination(data.page, data.pages);
+}
+
+/** Affiche une liste d'offres (ou l'état vide) dans la grille. */
+function showResults(offers, { count, emptyTitle, emptySubtitle }) {
+  const grid  = document.getElementById("offers-grid");
+  const empty = document.getElementById("empty-state");
+  const countEl = document.getElementById("result-count");
+
+  if (!offers || offers.length === 0) {
+    grid.innerHTML = "";
+    document.getElementById("empty-title").textContent    = emptyTitle;
+    document.getElementById("empty-subtitle").textContent = emptySubtitle;
+    empty.classList.remove("hidden");
+    countEl.textContent = "";
+  } else {
+    empty.classList.add("hidden");
+    countEl.textContent = count;
+    grid.innerHTML = offers.map(renderCard).join("");
+  }
+}
+
+/** Re-rend les cartes actuellement affichées (ex. pour mettre à jour les cœurs). */
+function rerenderCards() {
+  if (lastOffers.length === 0) return;
+  document.getElementById("offers-grid").innerHTML = lastOffers.map(renderCard).join("");
 }
 
 // =============================================================================
@@ -178,11 +214,21 @@ function renderCard(offer) {
        </div>`
     : "";
 
+  const isFav = favoriteIds.has(offer.id);
+  const favBtn = `
+    <button class="fav-btn ${isFav ? "is-fav" : ""}"
+            onclick="toggleFavorite(${offer.id}, this)"
+            title="${isFav ? "Retirer des favoris" : "Ajouter aux favoris"}"
+            aria-label="Favori">${isFav ? "♥" : "♡"}</button>`;
+
   return `
     <div class="offer-card">
-      <div>
-        <p class="offer-title">${escapeHtml(offer.title)}</p>
-        <p class="offer-company">${escapeHtml(offer.company || "Entreprise non précisée")}</p>
+      <div class="offer-head">
+        <div class="offer-head-text">
+          <p class="offer-title">${escapeHtml(offer.title)}</p>
+          <p class="offer-company">${escapeHtml(offer.company || "Entreprise non précisée")}</p>
+        </div>
+        ${favBtn}
       </div>
       <div class="offer-meta">
         ${offer.location ? `<span>${escapeHtml(offer.location)}</span>` : ""}
@@ -303,9 +349,9 @@ function refresh() {
 // UTILITAIRES
 // =============================================================================
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, options);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (e) {
@@ -349,4 +395,227 @@ function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add("show");
   setTimeout(() => toast.classList.remove("show"), 4000);
+}
+
+// =============================================================================
+// AUTHENTIFICATION (connexion / inscription)
+// =============================================================================
+
+function authHeaders() {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
+/** Met à jour l'affichage header selon l'état connecté/déconnecté. */
+function renderAuthUI() {
+  const loggedIn = !!authToken;
+  document.getElementById("auth-logged-out").classList.toggle("hidden", loggedIn);
+
+  const inEl = document.getElementById("auth-logged-in");
+  inEl.classList.toggle("hidden", !loggedIn);
+  inEl.classList.toggle("flex", loggedIn);
+
+  document.getElementById("user-email").textContent = authEmail;
+}
+
+function setSession(token, email) {
+  authToken = token;
+  authEmail = email;
+  localStorage.setItem("alternax_token", token);
+  localStorage.setItem("alternax_email", email);
+  renderAuthUI();
+}
+
+function clearSession() {
+  authToken = "";
+  authEmail = "";
+  favoriteIds = new Set();
+  localStorage.removeItem("alternax_token");
+  localStorage.removeItem("alternax_email");
+  renderAuthUI();
+}
+
+/** Au chargement : si un token existe, on le valide et on charge les favoris. */
+async function restoreSession() {
+  if (!authToken) { renderAuthUI(); return; }
+  const me = await fetchJson(`${API}/me`, { headers: authHeaders() });
+  if (!me) { clearSession(); return; }   // token invalide/expiré
+  authEmail = me.email;
+  localStorage.setItem("alternax_email", me.email);
+  renderAuthUI();
+  await loadFavoriteIds();
+}
+
+// --- Modale ---
+
+function openAuthModal() {
+  document.getElementById("auth-error").classList.add("hidden");
+  document.getElementById("auth-modal").classList.remove("hidden");
+  document.getElementById("auth-email").focus();
+}
+
+function closeAuthModal() {
+  document.getElementById("auth-modal").classList.add("hidden");
+}
+
+function toggleAuthMode() {
+  authMode = authMode === "login" ? "register" : "login";
+  applyAuthMode();
+}
+
+/** Adapte les libellés de la modale selon le mode connexion/inscription. */
+function applyAuthMode() {
+  const isLogin = authMode === "login";
+  document.getElementById("auth-title").textContent     = isLogin ? "Connexion" : "Créer un compte";
+  document.getElementById("auth-subtitle").textContent  = isLogin
+    ? "Connecte-toi pour retrouver tes offres favorites."
+    : "Crée un compte pour sauvegarder tes offres favorites.";
+  document.getElementById("auth-submit").textContent      = isLogin ? "Se connecter" : "Créer mon compte";
+  document.getElementById("auth-switch-text").textContent = isLogin ? "Pas encore de compte ?" : "Déjà un compte ?";
+  document.getElementById("auth-switch-btn").textContent  = isLogin ? "Créer un compte" : "Se connecter";
+  document.getElementById("auth-password").autocomplete   = isLogin ? "current-password" : "new-password";
+  document.getElementById("auth-error").classList.add("hidden");
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  const email    = document.getElementById("auth-email").value.trim();
+  const password = document.getElementById("auth-password").value;
+  const errEl    = document.getElementById("auth-error");
+  const submitBtn = document.getElementById("auth-submit");
+  errEl.classList.add("hidden");
+  submitBtn.disabled = true;
+
+  const endpoint = authMode === "login" ? "login" : "register";
+  let res;
+  try {
+    res = await fetch(`${API}/auth/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (e) {
+    errEl.textContent = "Impossible de joindre le serveur.";
+    errEl.classList.remove("hidden");
+    submitBtn.disabled = false;
+    return;
+  }
+
+  const data = await res.json().catch(() => ({}));
+  submitBtn.disabled = false;
+
+  if (!res.ok) {
+    errEl.textContent = data.detail || "Une erreur est survenue.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+
+  setSession(data.token, data.email);
+  closeAuthModal();
+  document.getElementById("auth-form").reset();
+  await loadFavoriteIds();
+  showToast(authMode === "login" ? "Connecté ✓" : "Compte créé, bienvenue !");
+}
+
+async function logout() {
+  try {
+    await fetch(`${API}/auth/logout`, { method: "POST", headers: authHeaders() });
+  } catch (e) { /* on déconnecte côté client quoi qu'il arrive */ }
+  clearSession();
+  if (viewMode === "favorites") {
+    loadOffers(1);          // on quitte la vue favoris
+  } else {
+    rerenderCards();        // les cœurs repassent à vide
+  }
+  showToast("Déconnecté");
+}
+
+// =============================================================================
+// FAVORIS
+// =============================================================================
+
+/** Charge l'ensemble des ids favoris (et rafraîchit les cœurs visibles). */
+async function loadFavoriteIds() {
+  if (!authToken) return;
+  const data = await fetchJson(`${API}/favorites`, { headers: authHeaders() });
+  if (!data) return;
+  favoriteIds = new Set(data.ids);
+  if (viewMode === "all") rerenderCards();
+}
+
+/** Ajoute / retire une offre des favoris (nécessite d'être connecté). */
+async function toggleFavorite(offerId, btnEl) {
+  if (!authToken) {
+    showToast("Connecte-toi pour sauvegarder des favoris");
+    openAuthModal();
+    return;
+  }
+
+  const isFav  = favoriteIds.has(offerId);
+  const method = isFav ? "DELETE" : "POST";
+
+  let res;
+  try {
+    res = await fetch(`${API}/favorites/${offerId}`, { method, headers: authHeaders() });
+  } catch (e) {
+    showToast("Erreur réseau, réessaie");
+    return;
+  }
+  if (!res.ok) { showToast("Erreur, réessaie"); return; }
+
+  if (isFav) favoriteIds.delete(offerId);
+  else       favoriteIds.add(offerId);
+
+  if (viewMode === "favorites" && isFav) {
+    // On vient de retirer un favori → on l'enlève de la liste affichée.
+    lastOffers = lastOffers.filter(o => o.id !== offerId);
+    showResults(lastOffers, {
+      count: favCountLabel(lastOffers.length),
+      emptyTitle: "Aucun favori pour l'instant",
+      emptySubtitle: "Clique sur le ♥ d'une offre pour la sauvegarder ici.",
+    });
+  } else {
+    updateFavButton(btnEl, !isFav);
+  }
+}
+
+function updateFavButton(btn, isFav) {
+  if (!btn) return;
+  btn.classList.toggle("is-fav", isFav);
+  btn.textContent = isFav ? "♥" : "♡";
+  btn.title = isFav ? "Retirer des favoris" : "Ajouter aux favoris";
+}
+
+/** Bascule entre la vue "toutes les offres" et la vue "mes favoris". */
+function toggleFavoritesView() {
+  if (viewMode === "favorites") loadOffers(1);
+  else                          loadFavoritesView();
+}
+
+async function loadFavoritesView() {
+  viewMode = "favorites";
+  updateFavToggleUI();
+  showLoading(true);
+
+  const data = await fetchJson(`${API}/favorites`, { headers: authHeaders() });
+  showLoading(false);
+  if (!data) return;
+
+  favoriteIds = new Set(data.ids);
+  lastOffers  = data.offers;
+  document.getElementById("pagination").innerHTML = "";
+
+  showResults(data.offers, {
+    count: favCountLabel(data.offers.length),
+    emptyTitle: "Aucun favori pour l'instant",
+    emptySubtitle: "Clique sur le ♥ d'une offre pour la sauvegarder ici.",
+  });
+}
+
+function favCountLabel(n) {
+  return n === 0 ? "" : `${n} favori${n > 1 ? "s" : ""}`;
+}
+
+function updateFavToggleUI() {
+  const btn = document.getElementById("fav-toggle");
+  if (btn) btn.classList.toggle("fav-toggle-active", viewMode === "favorites");
 }
