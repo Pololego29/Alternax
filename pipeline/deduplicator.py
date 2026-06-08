@@ -12,7 +12,7 @@ Deux niveaux de déduplication :
 import hashlib
 from dataclasses import asdict
 
-from database.db import insert_offers_bulk, url_exists
+from database.db import insert_offers_bulk, get_existing_urls
 
 
 # =============================================================================
@@ -61,6 +61,7 @@ def deduplicate(offers: list[dict]) -> list[dict]:
     Returns:
         Sous-liste contenant uniquement les offres inédites
     """
+    existing_urls     = get_existing_urls()   # une seule requête vers la base
     seen_urls         = set()
     seen_fingerprints = set()
     unique: list[dict] = []
@@ -75,8 +76,8 @@ def deduplicate(offers: list[dict]) -> list[dict]:
         if fingerprint in seen_fingerprints:
             continue
 
-        # --- Dédup contre la base (par URL) ---
-        if url and url_exists(url):
+        # --- Dédup contre la base (par URL), en mémoire ---
+        if url and url in existing_urls:
             continue
 
         seen_urls.add(url)

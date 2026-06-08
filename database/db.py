@@ -366,6 +366,20 @@ def url_exists(url: str) -> bool:
         return row is not None
 
 
+def get_existing_urls() -> set[str]:
+    """Retourne toutes les URLs déjà en base en UNE seule requête.
+
+    Utilisé par la déduplication en lot. Évite d'ouvrir une connexion par
+    offre (ce qui était catastrophiquement lent sur une base distante comme
+    Neon : une connexion SSL par URL → des centaines de connexions par run).
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT url FROM offers WHERE url IS NOT NULL AND url != ''"
+        ).fetchall()
+    return {r["url"] for r in rows}
+
+
 # =============================================================================
 # SECTION 5 – UTILISATEURS, SESSIONS & FAVORIS
 # =============================================================================
