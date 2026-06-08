@@ -78,14 +78,18 @@ async def lifespan(app: FastAPI):
 # =============================================================================
 app = FastAPI(title="Alternax API", lifespan=lifespan)
 
-# CORS : si FRONTEND_URL est défini (prod), on restreint à cette origine ;
-# sinon (local, variable vide) on ouvre à tout le monde.
+# CORS : on autorise l'URL front explicite (FRONTEND_URL) si elle est fournie,
+# et dans tous les cas les déploiements *.vercel.app + le localhost de dev, via
+# un regex. Sans ça, le site casse (page vide) dès que l'URL Vercel change ou
+# que FRONTEND_URL pointe sur une ancienne URL : le navigateur bloque les appels
+# faute d'en-tête Access-Control-Allow-Origin.
 _frontend_url = os.environ.get("FRONTEND_URL", "").strip()
-_allowed_origins = [_frontend_url] if _frontend_url else ["*"]
+_allowed_origins = [_frontend_url] if _frontend_url else []
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*vercel\.app|http://localhost(:\d+)?",
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
