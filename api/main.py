@@ -247,3 +247,13 @@ def delete_favorite(offer_id: int, user: dict = Depends(current_user)):
     """Retire une offre des favoris."""
     remove_favorite(user["id"], offer_id)
     return {"ok": True}
+
+
+# =============================================================================
+# 7. FICHIERS DU FRONT À LA RACINE
+# =============================================================================
+# index.html référence ses assets en racine (/style.css, /config.js, /app.js,
+# /logo.png). On monte donc le dossier frontend sur "/" — placé APRÈS toutes les
+# routes /api pour qu'il ne serve qu'en dernier recours (fallback). html=True
+# fait servir index.html pour "/". Sans ça, le site est cassé en local.
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
